@@ -148,17 +148,9 @@ export default function TestPage({ params }) {
       if (!isTerminated) logProctorEvent('tab_switch', 'Window lost focus.');
     };
 
-    const handleBeforeUnload = (e) => {
-      if (!isTerminated) {
-        e.preventDefault();
-        e.returnValue = 'Are you sure you want to leave? Your assessment will be terminated.';
-      }
-    };
-
     document.addEventListener('visibilitychange', handleVisChange);
     document.addEventListener('fullscreenchange', handleFsChange);
     window.addEventListener('blur', handleBlur);
-    window.addEventListener('beforeunload', handleBeforeUnload);
     document.addEventListener('copy', (e) => enforceProctoring(e,'copy_attempt','Copy-paste is disabled'));
     document.addEventListener('cut', (e) => enforceProctoring(e,'copy_attempt','Cut is disabled'));
     document.addEventListener('paste', (e) => enforceProctoring(e,'copy_attempt','Paste is disabled'));
@@ -180,7 +172,6 @@ export default function TestPage({ params }) {
       document.removeEventListener('visibilitychange', handleVisChange);
       document.removeEventListener('fullscreenchange', handleFsChange);
       window.removeEventListener('blur', handleBlur);
-      window.removeEventListener('beforeunload', handleBeforeUnload);
       document.removeEventListener('keydown', blockEscapeKey, true);
       clearInterval(interval);
     };
