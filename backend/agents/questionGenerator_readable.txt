@@ -1,0 +1,312 @@
+﻿const fetch = require('node-fetch');
+
+function removeDuplicateMCQs(questions) {
+  const seen = new Set();
+  return questions.filter(q => {
+    if (q.type !== 'mcq') return true;
+    
+    // Extract key concept words from question
+    const key = q.question
+      .toLowerCase()
+      .replace(/what is the (primary|main) (purpose|benefit|goal|difference|function) of/g, '')
+      .replace(/in (distributed systems|cloud computing|databases|algorithm design)/g, '')
+      .replace(/why (is|do|should) we use/g, '')
+      .trim()
+      .split(' ')
+      .slice(0, 5)
+      .join(' ');
+    
+    if (seen.has(key)) return false; // Remove duplicate
+    seen.add(key);
+    return true;
+  });
+}
+
+function sanitizeTestCases(questions) {
+  if (!Array.isArray(questions)) return [];
+  const mcqs = removeDuplicateMCQs(questions); // Apply semantic deduplication
+  
+  return mcqs.map(q => {
+    // Remove "Why this question:" prefix if AI added it, to prevent double-prefix issues
+    if (q.reasoning) {
+        q.reasoning = q.reasoning.replace(/^(Why this question:|reasoning:)\s*/i, '').trim();
+    }
+
+    if (q.type !== 'coding') return q;
+    
+    // Validate and fix test cases
+    if (q.testCases) {
+      q.testCases = q.testCases.map(tc => {
+        // Ensure input is proper object not string
+        if (typeof tc.input === 'string') {
+          try {
+            const parsed = JSON.parse(tc.input);
+            if (typeof parsed === 'object') tc.input = parsed;
+          } catch(e) {}
+        }
+        return tc;
+      });
+    }
+
+    // Ensure reasoning is present and follows format
+    if (!q.reasoning || q.reasoning.length < 20) {
+      q.reasoning = `Selected for this role based on technical requirements in ${q.title || 'engineering'}.`;
+    }
+
+    return q;
+  });
+}
+
+/**
+ * Generate assessment questions using Groq (Llama-3.3-70b)
+ * Questions are generated ONCE per batch â€” all candidates get identical questions.
+ * @param {Object} role - JobRole document
+ */
+async function generateQuestions(role) {
+  const { title, jd, about, experienceYears, skills, questionConfig } = role;
+  const groqKey = process.env.GROQ_API_KEY;
+
+  const defaultQuestions = require('../data/defaultQuestions');
+  const mcqConfig = questionConfig?.mcq || { count: 4, difficulty: 'medium' };
+  const codingConfig = questionConfig?.coding || { count: 2, difficulty: 'medium' };
+  const languages = questionConfig?.languages || ['javascript', 'python'];
+
+  const mcqCount = mcqConfig.count;
+  const codingCount = codingConfig.count;
+
+  const prompt = `You are an expert technical interviewer. Generate a complete technical assessment for the following role.
+
+Job Role:
+Title: ${title}
+Experience: ${experienceYears} years
+Company/Project Context: ${about}
+JD: ${jd}
+Required Skills: ${(skills || []).join(', ')}
+Languages: ${languages.join(', ')}
+MCQ Difficulty: ${mcqConfig.difficulty}
+Coding Difficulty: ${codingConfig.difficulty}
+
+Generate EXACTLY:
+- ${mcqCount} MCQ questions
+- ${codingCount} Coding Problems
+
+â•â•â•â•â•â•â•â•â•â•â•â•â•MCQ RULES â€” CRITICAL:
+- Questions MUST test genuine technical knowledge â€” NOT company culture or JD rephrasing
+- NEVER ask questions whose answers can be found by reading the JD
+- NEVER ask about years of experience, team behavior, or soft skills
+- ALWAYS ask about concrete technical concepts relevant to the role
+
+DEDUPLICATION RULES:
+- Never ask two questions about the same concept
+- Load balancing and load balancer are the same topic â€” ask only once
+- Message queue and message broker are the same topic â€” ask only once
+- Each MCQ must test a completely different technical concept
+- Before finalizing, verify all questions test distinct concepts
+
+TECHNICAL FOCUS AREAS (Prioritize based on role):
+- Backend/Systems: CAP theorem, ACID, Concurrency (race conditions, deadlocks), Indexing, Sharding, Load balancing, Message queues, REST/GraphQL trade-offs.
+- Frontend: Rendering lifecycle, Shadow DOM, State management, Performance (LCP/FID), CSS Grid/Flexbox internals, Web Security (XSS/CSRF).
+- Role Context: If the role is for "${about}", pick concepts vital for THAT specific type of product.
+
+MCQ FORMAT:
+- 4 technically plausible options (A/B/C/D). Wrong options must be common misconceptions.
+- correctOption is 0-indexed integer.
+- timeLimit: 120 seconds, points: 5.
+
+MCQ REASONING â€” MUST follow this specific format (DO NOT include "Why this question" prefix):
+"Tests understanding of [specific technical concept] which is directly relevant to [specific aspect of THIS role/company type] because [concrete technical reason why it matters for their actual work]"
+â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+CODING RULES â€” CRITICAL:
+1. Each problem MUST be purely ALGORITHMIC (Arrays, Strings, Trees, DP, Math). No frameworks.
+2. MUST have EXACTLY 2 visible test cases (isVisible: true) and EXACTLY 2 hidden test cases (isVisible: false).
+3. Starter code function MUST be named "solution".
+4. timeLimit: Hard = 2700s, Medium = 1200s, Easy = 900s.
+5. points: 20 per problem.
+
+MULTI-INPUT PROBLEMS:
+- Problems with multiple inputs MUST show ALL inputs in examples
+- Longest Common Subsequence: input must show BOTH strings (e.g. s1 = "...", s2 = "...")
+- Minimum Window Substring: input must show BOTH string and pattern (s = "...", t = "...")
+- Two Sum: input must show BOTH array and target (nums = [...], target = X)
+- Never show partial inputs â€” always show the complete input set required for the problem.
+
+CODING REASONING â€” MUST follow this specific format (DO NOT include "Why this question" prefix):
+"[Problem name] tests [specific algorithm/DS] which mirrors [specific real-world engineering challenge] that engineers at ${about} face when [concrete scenario]"
+â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+CRITICAL JSON FORMATTING â€” FAILURES HERE ARE UNACCEPTABLE:
+- Arrays MUST use comma separation: [1, 4, 5] NOT [145]
+- Nested arrays MUST be properly formatted: [[1,4,5],[1,3,4]] NOT [[145][134]]
+- Every array element must be separated by a comma and space.
+- Test case inputs and outputs are native JSON â€” NEVER stringify arrays into numbers.
+- Ensure all JSON is perfectly parsable by JSON.parse().
+â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•â•
+
+Return ONLY valid JSON. No markdown.
+
+{
+  "questions": [
+    {
+      "type": "mcq",
+      "question": "...",
+      "options": ["A", "B", "C", "D"],
+      "correctOption": 0,
+      "reasoning": "Tests understanding of...",
+      "points": 5,
+      "timeLimit": 120,
+      "difficulty": "${mcqConfig.difficulty}"
+    },
+    {
+      "title": "...",
+      "type": "coding",
+      "difficulty": "${codingConfig.difficulty}",
+      "points": 20,
+      "reasoning": "[Problem name] tests...",
+      "description": "...",
+      "constraints": ["..."],
+      "examples": [
+        { "input": "[1, 2, 3]", "output": "[3, 2, 1]", "explanation": "..." }
+      ],
+      "testCases": [
+        { "input": {"arr": [1, 2, 3]}, "expectedOutput": [3, 2, 1], "isVisible": true },
+        { "input": {"arr": []}, "expectedOutput": [], "isVisible": true },
+        { "input": {"arr": [1]}, "expectedOutput": [1], "isVisible": false },
+        { "input": {"arr": [5, 4, 3, 2, 1]}, "expectedOutput": [1, 2, 3, 4, 5], "isVisible": false }
+      ],
+      "starterCode": {
+        "javascript": "function solution(args) { ... }",
+        "python": "def solution(args): ..."
+      }
+    }
+  ]
+}
+`;
+  { "input": {"arr": [1]}, "expectedOutput": [1], "isVisible": false },
+        { "input": {"arr": [5, 4, 3, 2, 1]}, "expectedOutput": [1, 2, 3, 4, 5], "isVisible": false }
+      ],
+      "starterCode": {
+        "javascript": "function solution(args) { ... }",
+        "python": "def solution(args): ..."
+      }
+    }
+  ]
+}`;
+
+  try {
+    let attempts = 0;
+    const maxAttempts = 2;
+    let lastError = null;
+
+    while (attempts < maxAttempts) {
+      try {
+        if (!groqKey) throw new Error('GROQ_API_KEY missing');
+
+        const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "Authorization": `Bearer ${groqKey}`
+          },
+          body: JSON.stringify({
+            model: "llama-3.3-70b-versatile",
+            messages: [{ role: "user", content: prompt }],
+            response_format: { type: "json_object" },
+            temperature: (attempts === 0) ? 0.3 : 0.1,
+            max_tokens: 4096
+          })
+        });
+
+        const data = await response.json();
+        if (data.error) {
+          console.error(`[Groq API Attempt ${attempts + 1} Error]:`, data.error);
+          lastError = new Error(data.error.message || 'Groq API Error');
+          attempts++;
+          continue;
+        }
+
+        if (!data.choices?.length || !data.choices[0].message?.content) {
+          lastError = new Error('Empty Groq response');
+          attempts++;
+          continue;
+        }
+
+        let content = data.choices[0].message.content.trim();
+        const jsonMatch = content.match(/\{[\s\S]*\}/);
+        if (jsonMatch) content = jsonMatch[0];
+
+        const parsed = JSON.parse(content);
+        const rawQuestions = parsed.questions || [];
+
+        // Apply sanitation and critical bug fixes
+        const sanitized = sanitizeTestCases(rawQuestions);
+
+        return sanitized.map(q => {
+          if (q.type === 'coding') {
+            if (!q.question && q.description) q.question = q.description;
+            
+            if (q.examples) {
+              q.examples = q.examples.map(ex => ({
+                ...ex,
+                input: typeof ex.input === 'object' ? JSON.stringify(ex.input) : String(ex.input),
+                output: typeof ex.output === 'object' ? JSON.stringify(ex.output) : String(ex.output)
+              }));
+            }
+            
+            if (q.testCases) {
+              q.testCases = q.testCases.map(tc => ({
+                ...tc,
+                input: typeof tc.input === 'object' ? JSON.stringify(tc.input) : String(tc.input),
+                expectedOutput: typeof tc.expectedOutput === 'object' ? JSON.stringify(tc.expectedOutput) : String(tc.expectedOutput)
+              }));
+            }
+          }
+          return q;
+        });
+      } catch (err) {
+        console.warn(`[QuestionGenerator] Attempt ${attempts + 1} Panic:`, err.message);
+        lastError = err;
+        attempts++;
+      }
+    }
+
+    if (lastError) throw lastError;
+    throw new Error('Question generation failed after all attempts');
+
+  } catch (err) {
+    console.warn('[QuestionGenerator] Groq Exception (Falling back to default questions):', err.message);
+
+    const mockQuestions = [];
+    let availableMcqs = defaultQuestions.mcq.filter(q => q.difficulty === (mcqConfig.difficulty || 'medium'));
+    if (availableMcqs.length === 0) availableMcqs = defaultQuestions.mcq;
+    for (let i = 0; i < mcqCount; i++) {
+      const q = availableMcqs[i % availableMcqs.length] || defaultQuestions.mcq[0];
+      mockQuestions.push({ ...q, type: 'mcq', points: 5, difficulty: mcqConfig.difficulty || 'medium' });
+    }
+    let availableCoding = defaultQuestions.coding.filter(q => q.difficulty === (codingConfig.difficulty || 'medium'));
+    if (availableCoding.length === 0) availableCoding = defaultQuestions.coding;
+    for (let i = 0; i < codingCount; i++) {
+      const q = availableCoding[i % availableCoding.length] || defaultQuestions.coding[0];
+      mockQuestions.push({ ...q, type: 'coding', points: 20, difficulty: codingConfig.difficulty || 'medium' });
+    }
+    return mockQuestions;
+  }
+}
+
+/**
+ * Generate follow-up theory questions based on candidate's submitted code
+ */
+async function generateTheoryFromCode(code, language, problemStatement) {
+  const groqKey = process.env.GROQ_API_KEY;
+  if (!groqKey) return [];
+  const prompt = `Code submitted:\n\n${code}\n\nGenerate 2 technical follow-up questions about this code. JSON: { "questions": [{ "type": "theory", "question": "...", "rubric": "...", "points": 10, "timeLimit": 180 }] }`;
+  try {
+    const response = await fetch("https://api.groq.com/openai/v1/chat/completions", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", "Authorization": `Bearer ${groqKey}` },
+      body: JSON.stringify({ model: "llama-3.3-70b-versatile", messages: [{ role: "user", content: prompt }], response_format: { type: "json_object" } })
+    });
+    const data = await response.json();
+    return JSON.parse(data.choices[0].message.content).questions || [];
+  } catch (e) { return []; }
+}
+
+module.exports = { generateQuestions, generateTheoryFromCode };
