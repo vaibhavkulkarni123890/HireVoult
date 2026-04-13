@@ -164,7 +164,13 @@ except Exception as e:
                 parsedActual = rawResult;
             }
 
-            const passed = !error && JSON.stringify(parsedActual) === JSON.stringify(tc.expectedOutput);
+            // If expectedOutput is an array, pass if actual matches ANY element (multiple valid answers)
+            const _expected2 = tc.expectedOutput;
+            const passed = !error && (
+                Array.isArray(_expected2)
+                    ? _expected2.some(e => JSON.stringify(parsedActual) === JSON.stringify(e))
+                    : JSON.stringify(parsedActual) === JSON.stringify(_expected2)
+            );
             results.push({ 
                 passed, 
                 input: tc.input, 
