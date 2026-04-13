@@ -73,9 +73,13 @@ async function runJS(code, testCases) {
             } catch (e) {
                 parsedActual = rawResult;
             }
-
-            // Robust comparison: compare JSON-normalized versions of both
-            const passed = !error && JSON.stringify(parsedActual) === JSON.stringify(tc.expectedOutput);
+            // Robust comparison: if expectedOutput is an array, pass if actual matches ANY element (multiple valid answers)
+            const _expected = tc.expectedOutput;
+            const passed = !error && (
+                Array.isArray(_expected)
+                    ? _expected.some(e => JSON.stringify(parsedActual) === JSON.stringify(e))
+                    : JSON.stringify(parsedActual) === JSON.stringify(_expected)
+            );
             results.push({ 
                 passed, 
                 input: tc.input, 
