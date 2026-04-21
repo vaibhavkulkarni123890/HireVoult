@@ -7,8 +7,8 @@ const Assessment = require('../models/Assessment');
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 function getProviderPriority() {
-  const order = process.env.AI_PROVIDER_ORDER || 'openrouter,claude';
-  const allowed = new Set(['openrouter','claude']);
+  const order = process.env.AI_PROVIDER_ORDER || 'gemini,openrouter,claude';
+  const allowed = new Set(['gemini', 'openrouter', 'claude']);
   return order.split(',').map(p => p.trim().toLowerCase()).filter(p => allowed.has(p));
 }
 
@@ -64,6 +64,39 @@ async function callClaude(prompt) {
   return data.content?.[0]?.text || '';
 }
 
+async function callGemini(prompt) {
+  const apiKey = process.env.GEMINI_API_KEY;
+  if (!apiKey) throw new Error('Gemini API key not configured');
+
+  const modelsToTry = [
+    process.env.GEMINI_MODEL_NAME || 'gemini-1.5-flash',
+    'gemini-1.5-flash-latest',
+    'gemini-1.5-pro',
+    'gemini-1.5-pro-latest',
+    'gemini-pro',
+    'gemini-1.0-pro'
+  ];
+
+  let lastError;
+  for (const modelName of modelsToTry) {
+    try {
+      // Force 'v1' stable endpoint instead of 'v1beta' to avoid 404s
+      const model = genAI.getGenerativeModel({ model: modelName }, { apiVersion: 'v1' });
+      const result = await model.generateContent(prompt);
+      const response = await result.response;
+      return response.text();
+    } catch (err) {
+      console.warn(`[GradingAgent] Gemini model ${modelName} failed: ${err.message}`);
+      lastError = err;
+      if (err.message.includes('404') || err.message.toLowerCase().includes('not found')) {
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw lastError;
+}
+
 async function callAIWithFallback(prompt, fallbackProviders = null) {
   const providers = fallbackProviders || getProviderPriority();
 
@@ -75,6 +108,8 @@ async function callAIWithFallback(prompt, fallbackProviders = null) {
         content = await callOpenRouter(prompt);
       } else if (provider === 'claude') {
         content = await callClaude(prompt);
+      } else if (provider === 'gemini') {
+        content = await callGemini(prompt);
       }
 
       if (content) {
@@ -96,39 +131,120 @@ function gradeMCQ(question, answer) {
   return { score: correct ? question.points : 0, max: question.points, feedback: correct ? 'Correct' : `Incorrect. Correct answer: Option ${question.correctOption + 1}` };
 }
 
-function gradeCoding(question, answer) {
-  if (!answer?.code) return { score: 0, max: question.points, feedback: 'No code submitted', testResults: [] };
+const { VM } = require('vm2');
 
-  const { VM } = require('vm2');
+/**
+ * Grades a coding submission by running it against predefined test cases.
+ * Handles both JavaScript execution and result comparison.
+ */
+function gradeCoding(question, answer) {
+  // 1. Basic Validation
+  if (!answer?.code) {
+    return { score: 0, max: question.points, feedback: 'No code submitted', testResults: [] };
+  }
+
+  // 2. PREFERRED: Use test results already calculated by the containerized runner
+  if (answer.testCasesResults && answer.testCasesResults.length > 0) {
+    const passedCount = answer.testCasesResults.filter(r => r.passed).length;
+    const totalTests = answer.testCasesResults.length || 1;
+    const score = Math.round((passedCount / totalTests) * question.points);
+    return {
+      score,
+      max: question.points,
+      feedback: `${passedCount}/${totalTests} test cases passed`,
+      testResults: answer.testCasesResults
+    };
+  }
+
+  // 3. FALLBACK: Manual JS Sandbox Execution
   const testResults = [];
   let passedCount = 0;
 
+  // Prevent Python code from running in the JS VM
+  if (answer.code.includes('def ')) {
+    return {
+      score: 0,
+      max: question.points,
+      feedback: 'Python grading requires pre-run test cases from the runner.',
+      testResults: []
+    };
+  }
+
   for (const tc of (question.testCases || [])) {
     try {
-      const vm = new VM({ timeout: 3000, sandbox: {} });
+      const vm = new VM({ timeout: 1500, sandbox: {} });
+
+      // CRITICAL FIX: Stringify inputs and outputs OUTSIDE the template literal
+      // This prevents the data from being converted to "[object Object]"
+      const inputData = JSON.stringify(tc.input);
+      const expectedData = JSON.stringify(tc.expectedOutput);
+
       const script = `
         ${answer.code}
         (function() {
           try {
-            const input = ${JSON.stringify(tc.input)};
-            const result = typeof solution !== 'undefined' ? String(solution(input)) : 'NO_FUNCTION';
-            result;
-          } catch(e) { 'ERROR: ' + e.message; }
+            // Parse it back into a real JS object inside the VM
+            const input = ${inputData};
+            
+            // Dynamic function identification
+            const fn = typeof twoSum !== 'undefined' ? twoSum : 
+                       typeof lengthOfLongestSubstring !== 'undefined' ? lengthOfLongestSubstring :
+                       typeof solution !== 'undefined' ? solution : null;
+            
+            if (!fn) return "NO_FUNCTION";
+
+            let result;
+            // Handle Two Sum style objects { nums: [], target: 0 }
+            if (input && typeof input === 'object' && input.nums && input.target !== undefined) {
+                result = fn(input.nums, input.target);
+            } else {
+                result = fn(input);
+            }
+            
+            // Return result as a JSON string for exact comparison
+            return JSON.stringify(result); 
+          } catch(e) { return "ERROR: " + e.message; }
         })();
       `;
-      const actual = String(vm.run(script));
-      const passed = actual.trim() === String(tc.expectedOutput).trim();
+
+      const actualRaw = vm.run(script);
+
+      // Compare the JSON string of the result with the JSON string of expected output
+      const passed = actualRaw === expectedData;
+
       if (passed) passedCount++;
-      testResults.push({ input: tc.input, expected: tc.expectedOutput, actual, passed, error: null });
+
+      testResults.push({
+        input: tc.input,
+        expected: tc.expectedOutput,
+        actual: actualRaw,
+        passed,
+        error: (actualRaw && actualRaw.includes("ERROR")) ? actualRaw : null
+      });
     } catch (err) {
-      testResults.push({ input: tc.input, expected: tc.expectedOutput, actual: null, passed: false, error: err.message });
+      testResults.push({
+        input: tc.input,
+        expected: tc.expectedOutput,
+        actual: null,
+        passed: false,
+        error: err.message
+      });
     }
   }
 
+  // 4. Final Score Calculation
   const totalTests = question.testCases?.length || 1;
   const score = Math.round((passedCount / totalTests) * question.points);
-  return { score, max: question.points, feedback: `${passedCount}/${totalTests} test cases passed`, testResults };
+
+  return {
+    score,
+    max: question.points,
+    feedback: `${passedCount}/${totalTests} test cases passed (HireVoult Sandbox)`,
+    testResults
+  };
 }
+
+module.exports = { gradeCoding };
 
 async function gradeTheory(question, answer) {
   // Only check if answer is empty/blank - rely on AI truthfulness evaluation
@@ -258,11 +374,11 @@ async function gradeSession(sessionOrId, assessmentInput, otherSessions) {
     let assessment = assessmentInput;
 
     if (typeof sessionOrId === 'string') {
-        session = await CandidateSession.findById(sessionOrId);
-        if (!session) throw new Error('Session not found by ID');
-        if (!assessment) {
-            assessment = await Assessment.findById(session.assessment);
-        }
+      session = await CandidateSession.findById(sessionOrId);
+      if (!session) throw new Error('Session not found by ID');
+      if (!assessment) {
+        assessment = await Assessment.findById(session.assessment);
+      }
     }
 
     if (!session) {
