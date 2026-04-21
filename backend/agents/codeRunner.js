@@ -73,17 +73,15 @@ async function runJS(code, testCases) {
             } catch (e) {
                 parsedActual = rawResult;
             }
-            // Robust comparison: if expectedOutput is an array, pass if actual matches ANY element (multiple valid answers)
-            const _expected = tc.expectedOutput;
-            const passed = !error && (
-                Array.isArray(_expected)
-                    ? _expected.some(e => JSON.stringify(parsedActual) === JSON.stringify(e))
-                    : JSON.stringify(parsedActual) === JSON.stringify(_expected)
-            );
+
+            // Robust comparison: compare JSON-normalized versions of both
+            const cleanExpected = JSON.stringify(tc.expectedOutput);
+            const formattedInput = typeof tc.input === 'object' ? JSON.stringify(tc.input) : String(tc.input);
+            const passed = !error && JSON.stringify(parsedActual) === cleanExpected;
             results.push({ 
                 passed, 
-                input: tc.input, 
-                expected: JSON.stringify(tc.expectedOutput), 
+                input: formattedInput, 
+                expected: cleanExpected, 
                 actual: rawResult, 
                 error 
             });
@@ -164,17 +162,13 @@ except Exception as e:
                 parsedActual = rawResult;
             }
 
-            // If expectedOutput is an array, pass if actual matches ANY element (multiple valid answers)
-            const _expected2 = tc.expectedOutput;
-            const passed = !error && (
-                Array.isArray(_expected2)
-                    ? _expected2.some(e => JSON.stringify(parsedActual) === JSON.stringify(e))
-                    : JSON.stringify(parsedActual) === JSON.stringify(_expected2)
-            );
+            const cleanExpected = JSON.stringify(tc.expectedOutput);
+            const formattedInput = typeof tc.input === 'object' ? JSON.stringify(tc.input) : String(tc.input);
+            const passed = !error && JSON.stringify(parsedActual) === cleanExpected;
             results.push({ 
                 passed, 
-                input: tc.input, 
-                expected: JSON.stringify(tc.expectedOutput), 
+                input: formattedInput, 
+                expected: cleanExpected, 
                 actual: rawResult, 
                 error 
             });
