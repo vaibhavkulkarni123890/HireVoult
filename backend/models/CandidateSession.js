@@ -88,7 +88,8 @@ const candidateSessionSchema = new mongoose.Schema({
     plagiarismFlag: { type: Boolean, default: false },
     plagiarismScore: Number, // 0-100, higher means more similar to others
     aiEvaluation: String, // Gemini's narrative evaluation
-    recommendation: { type: String, enum: ['strong_hire', 'hire', 'maybe', 'no_hire'] }
+    recommendation: { type: String, enum: ['strong_hire', 'hire', 'maybe', 'no_hire'] },
+    evaluations: [mongoose.Schema.Types.Mixed] // Store individual question results
   },
   gradedAt: Date,
   createdAt: { type: Date, default: Date.now }
