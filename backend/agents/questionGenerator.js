@@ -6,15 +6,15 @@ const path = require('path');
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 function getProviderPriority() {
-  const order = process.env.AI_PROVIDER_ORDER || 'openrouter,claude';
-  const allowed = new Set(['openrouter','claude']);
+  const order = process.env.AI_PROVIDER_ORDER || 'gemini,openrouter,claude';
+  const allowed = new Set(['gemini', 'openrouter', 'claude', 'groq', 'nvidia']);
   return order.split(',').map(p => p.trim().toLowerCase()).filter(p => allowed.has(p));
 }
 
 async function callOpenRouter(prompt) {
   const apiKey = process.env.OPENROUTER_API_KEY;
   if (!apiKey) throw new Error('OpenRouter API key not configured');
-  const modelName = process.env.OPENROUTER_MODEL_NAME || 'google/gemini-2.0-flash-001';
+  const modelName = process.env.OPENROUTER_MODEL_NAME || 'meta-llama/llama-3.3-70b-instruct';
   const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
     method: 'POST',
     headers: {
@@ -102,15 +102,38 @@ async function callGROQ(prompt) {
 }
 
 async function callGEMINI(prompt) {
-  const modelName = process.env.GEMINI_MODEL_NAME || 'gemini-1.5-flash';
-  const model = genAI.getGenerativeModel({ model: modelName });
-  const result = await model.generateContent(prompt, {
-    temperature: 0.3,
-    maxOutputTokens: 3000,
-    candidateCount: 1
-  });
-  const candidate = result.response?.candidates?.[0];
-  return candidate?.content?.parts?.map(part => part.text || '').join('') || '';
+  const modelsToTry = [
+    process.env.GEMINI_MODEL_NAME || 'gemini-1.5-flash',
+    'gemini-1.5-flash-latest',
+    'gemini-1.5-pro',
+    'gemini-1.5-pro-latest',
+    'gemini-pro',
+    'gemini-1.0-pro'
+  ];
+
+  let lastError;
+  for (const modelName of modelsToTry) {
+    try {
+      // Force 'v1' stable endpoint instead of 'v1beta' to avoid 404s
+      const model = genAI.getGenerativeModel({ model: modelName }, { apiVersion: 'v1' });
+      const result = await model.generateContent(prompt, {
+        temperature: 0.3,
+        maxOutputTokens: 3000,
+        candidateCount: 1
+      });
+      const candidate = result.response?.candidates?.[0];
+      const text = candidate?.content?.parts?.map(part => part.text || '').join('') || '';
+      if (text) return text;
+    } catch (err) {
+      console.warn(`[QuestionGenerator] Gemini model ${modelName} failed: ${err.message}`);
+      lastError = err;
+      if (err.message.includes('404') || err.message.toLowerCase().includes('not found')) {
+        continue;
+      }
+      throw err;
+    }
+  }
+  throw lastError;
 }
 
 async function callClaude(prompt) {
