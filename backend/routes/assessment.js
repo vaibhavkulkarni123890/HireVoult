@@ -383,7 +383,17 @@ async function runHiddenTestCases(session) {
     // ── Step 2: Trigger AI grading pipeline ──────────────────────────────────
     try {
       const { gradeSession } = require('../agents/gradingAgent');
-      await gradeSession(session._id.toString());
+      const finalScores = await gradeSession(session._id.toString());
+      
+      // PERSIST THE GRADING RESULT
+      const updatedSession = await CandidateSession.findById(session._id);
+      if (updatedSession) {
+          updatedSession.scores = finalScores;
+          updatedSession.status = 'graded';
+          updatedSession.gradedAt = new Date();
+          await updatedSession.save();
+          console.log(`[AI Grading Success] Session ${session._id} is now graded.`);
+      }
     } catch (gradingErr) {
       console.error('[AI Grading Error]:', gradingErr.message);
     }
