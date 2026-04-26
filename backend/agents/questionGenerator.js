@@ -670,7 +670,9 @@ const codingDiffs = Array(codingCount).fill().map((_, i) => {
   return allowedDifficulties[i % allowedDifficulties.length];
 });
 
-  const mcqDiff = pickDifficulty((mcqConfig.difficulty || 'medium').toLowerCase());
+const mcqDiffs = Array(mcqCount).fill().map((_, i) => {
+  return allowedDifficulties[i % allowedDifficulties.length];
+});
 
   const basePrompt = (type, count, difficulty) => `You are generating ${type.toUpperCase()} questions.
 
@@ -681,12 +683,17 @@ Format: Strict JSON with key "questions" as an array.
 
   const mcqPrompt   = `You are generating ${mcqCount} technical MCQ questions for a hiring assessment targeting these skills: ${skillsList}.
 
-Seniority: ${seniority || 'mid'}-level.
-Required difficulty: ${mcqDiff.toUpperCase()}.
+Allowed difficulties: ${allowedDifficulties.join(', ')}.
+STRICT: Do not generate questions outside these difficulty levels.
 
 ` + buildMCQFormat();
   let codingPrompt = `You are generating ${codingCount} algorithmic coding questions for a hiring assessment targeting these skills: ${skillsList}.
-Required difficulties: ${codingDiffs.join(', ')}.
+
+Allowed difficulties: ${allowedDifficulties.join(', ')}.
+STRICT: Do not generate questions outside these difficulty levels.
+
+Required difficulties distribution: ${codingDiffs.join(', ')}.
+
 ` + buildCodingFormat();
 
   let generatedMCQs = [];
@@ -696,6 +703,11 @@ Required difficulties: ${codingDiffs.join(', ')}.
     const content = await callAI(mcqPrompt);
     const parsed  = parseAIResponse(content);
     generatedMCQs = parsed.filter(q => (q.type === 'mcq' || Array.isArray(q.options))).slice(0, mcqCount);
+   generatedMCQs = generatedMCQs.map((q) => ({
+  ...q,
+  difficulty: q.difficulty || allowedDifficulties[0]
+}));
+
   } catch (err) {
     console.warn(`[QuestionGenerator] MCQ generation failed: ${err.message}`);
   }
@@ -746,7 +758,7 @@ if (generatedCoding.length < codingCount) {
   console.log(`[QuestionGenerator] MCQ generated so far: ${generatedMCQs.length}/${mcqCount}`);
   if (generatedMCQs.length < mcqCount) {
     console.log(`[QuestionGenerator] MCQ shortfall - calling ensureQuestionCount for ${mcqCount - generatedMCQs.length} more MCQs`);
-    const tmpMcq = await ensureQuestionCount(generatedMCQs, mcqCount, 'mcq', { skillsList, difficulty: mcqDiff });
+   const tmpMcq = await ensureQuestionCount(generatedMCQs, mcqCount, 'mcq', { skillsList, difficulty: allowedDifficulties.join(',') });
     console.log(`[QuestionGenerator] ensureQuestionCount returned ${tmpMcq.length} MCQs (was ${generatedMCQs.length})`);
     generatedMCQs = tmpMcq;
   }
