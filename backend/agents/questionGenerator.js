@@ -520,11 +520,8 @@ function parseAIResponse(content) {
   jsonStr = jsonStr.replace(/([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)(\s*:)/g, '$1"$2"$3');
 
   // Normalize Python booleans and nulls
-  jsonStr = jsonStr
-    .replace(/:\s*True\s*([,}])/g, ': true$1')
-    .replace(/:\s*False\s*([,}])/g, ': false$1')
-    .replace(/:\s*NaN\s*([,}])/g, ': null$1')
-    .replace(/:\s*undefined\s*([,}])/g, ': null$1');
+ // Strip ALL markdown fences aggressively
+jsonStr = jsonStr.replace(/```json\s*/gi, '').replace(/```\s*/gi, '').trim();
 
   // Strategy 1: Direct parse
   try {
