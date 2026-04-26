@@ -648,6 +648,20 @@ function extractAllTopLevelObjects(str) {
 function isValidCodingQuestion(q, existingTitles = [], seniority = 'mid') {
   if (!q || q.type === 'mcq' || q.type === 'theory') return false;
   if (!Array.isArray(q.testCases) || q.testCases.length < 2) return false;
+  const fullText = (q.description || q.question || q.title || '');
+  const hasPlaceholders = 
+    fullText.includes('[named parameter]') ||
+    fullText.includes('[constraint 1') ||
+    fullText.includes('[constraint 2') ||
+    fullText.includes('[linked list]') ||
+    fullText.includes('[array of integers]') ||
+    fullText.includes('[why this is the answer]') ||
+    fullText.includes('[maximum number') ||
+    fullText.includes('[first element');
+  if (hasPlaceholders) {
+    console.warn('[isValidCodingQuestion] Rejected placeholder question:', q.title);
+    return false;
+  }
   const titleOrDesc = (q.title || q.description || q.question || '').toLowerCase();
   const fullText = (q.title || q.description || q.question || '').toLowerCase();
 
@@ -912,26 +926,53 @@ Each section MUST start on a new line with the section header followed by a colo
 
 async function ensureQuestionCount(current, required, type, roleData) {
   if (current.length >= required) return current;
+  
   const missing = required - current.length;
-  const coveredTopics = current.map(q => (q.title || q.question || '').split(' ').slice(0, 5).join(' ')).join(', ');
+  const coveredTopics = current
+    .map(q => (q.title || q.question || '').split(' ').slice(0, 5).join(' '))
+    .join(', ');
   const skills = roleData.skillsList || '';
   const diff = roleData.difficulty || 'medium';
-  const mcqExtra = `Skills to test: ${skills}. Required difficulty: ${diff.toUpperCase()}. Avoid: ${coveredTopics}.`;
- const codingExtra = `Generate EXACTLY ${missing} coding questions. Required difficulties: ${(roleData.difficulties || [diff]).join(', ')}. Avoid topics already covered: ${coveredTopics}.\n`;
+
+  console.log(`[ensureQuestionCount] Generating ${missing} more ${type} questions`);
+
   try {
-    const content = await callAI(
-      type === 'mcq'
-        ? mcqExtra + '\n' + buildMCQFormat()
-        : codingExtra + '\n' + buildCodingFormat()
-    );
+    let prompt;
+
+    if (type === 'mcq') {
+      prompt = `Generate EXACTLY ${missing} technical MCQ questions for skills: ${skills}.
+Required difficulty: ${diff.toUpperCase()}.
+Avoid these already covered topics: ${coveredTopics}.
+
+${buildMCQFormat()}`;
+    } else {
+      const difficulties = (roleData.difficulties || [diff]).slice(0, missing);
+      
+      // Use the FULL coding prompt — same as original generateQuestions
+      prompt = `You are generating ${missing} algorithmic coding questions for a hiring assessment targeting these skills: ${skills}.
+Required difficulties: ${difficulties.join(', ')}.
+Avoid these already covered topics: ${coveredTopics}.
+
+CRITICAL: Do NOT use placeholder text like [named parameter], [constraint 1], [linked list], [array of integers] etc.
+Write REAL concrete problem statements with actual variable names, real constraints (e.g. 1 <= n <= 1000), and real examples.
+
+${buildCodingFormat()}`;
+    }
+
+    const content = await callAI(prompt);
     const parsed = parseAIResponse(content);
-   const add = parsed.filter(q => 
-  type === 'mcq' 
-    ? (q.type === 'mcq' || Array.isArray(q.options)) 
-    : (isValidCodingQuestion(q) || (q.type === 'coding' && Array.isArray(q.testCases)))
-);
+
+    const add = parsed.filter(q =>
+      type === 'mcq'
+        ? (q.type === 'mcq' || Array.isArray(q.options))
+        : isValidCodingQuestion(q, current.map(x => (x.title || '').toLowerCase()))
+    );
+
+    console.log(`[ensureQuestionCount] Got ${add.length} valid ${type} questions`);
     return [...current, ...add].slice(0, required);
+
   } catch (err) {
+    console.warn(`[ensureQuestionCount] Failed: ${err.message}`);
     throw new Error(`Failed to generate additional ${type} questions: ${err.message}`);
   }
 }
