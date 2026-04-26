@@ -27,7 +27,7 @@ async function callOpenRouter(prompt) {
       model: modelName,
       messages: [{ role: 'user', content: prompt }],
       temperature: 0.3,
-      max_tokens: 4000
+      max_tokens: 7000
     })
   });
   if (!response.ok) {
@@ -148,7 +148,7 @@ async function callClaude(prompt) {
     },
     body: JSON.stringify({
       model: process.env.CLAUDE_MODEL_NAME || 'claude-3-5-sonnet-20241022',
-      max_tokens: 5000,
+      max_tokens: 7000,
       temperature: 0.3,
       messages: [{ role: 'user', content: prompt }]
     })
@@ -468,111 +468,107 @@ Return ONLY JSON.
 }
 
 function parseAIResponse(content) {
-  if (!content) {
-    throw new Error('AI returned empty content');
-  }
+  if (!content) throw new Error('AI returned empty content');
 
-  // Temporary debug logging — remove after fixing
   console.warn('[parseAIResponse] Raw length:', content.length);
   console.warn('[parseAIResponse] Start:', content.slice(0, 300));
   console.warn('[parseAIResponse] End:', content.slice(-200));
 
   let jsonStr = content.trim();
 
-  // Strip all markdown code fences first (handles ```json at start)
-  jsonStr = jsonStr.replace(/^```(?:json)?\s*/m, '').replace(/\s*```$/m, '').trim();
+  // Strip markdown fences
+  jsonStr = jsonStr.replace(/^```(?:json)?\s*/m, '').replace(/\s*```\s*$/m, '').trim();
 
-  // Try to find the JSON part if there is preamble or postamble
- const jsonMatch = jsonStr.match(/\{[\s\S]*\}/);
-if (jsonMatch) {
-  jsonStr = jsonMatch[0].trim();
-}
-// Fix unescaped newlines inside JSON strings
-jsonStr = jsonStr.replace(/"([^"\\]*(\\.[^"\\]*)*)"/gs, (match) => {
-  return match.replace(/\n/g, '\\n').replace(/\r/g, '\\r').replace(/\t/g, '\\t');
-});
-  // Strategy 1: Direct parse
-  try {
-    const parsed = JSON.parse(jsonStr);
-    const rawQuestions = parsed.questions || (Array.isArray(parsed) ? parsed : []);
-    if (rawQuestions.length > 0) {
-      return rawQuestions.map(q => sanitizeQuestion(q));
-    }
-  } catch (e) {}
+  // Extract JSON object
+  const jsonMatch = jsonStr.match(/\{[\s\S]*\}/);
+  if (jsonMatch) jsonStr = jsonMatch[0].trim();
 
-  // Strategy 2: Sanitize and parse
-const sanitized = jsonStr
+  // Fix unescaped newlines inside string values
+  jsonStr = jsonStr.replace(/:(\s*)"([\s\S]*?)"/g, (match, space, val) => {
+    const fixed = val
+      .replace(/\n/g, '\\n')
+      .replace(/\r/g, '\\r')
+      .replace(/\t/g, '\\t');
+    return `:${space}"${fixed}"`;
+  });
+
+  // Fix single-quoted string values  e.g.  "key": 'value'  or  "key": ''
+  jsonStr = jsonStr.replace(/:\s*'([^']*)'/g, ': "$1"');
+  // Fix single-quoted inside arrays  ['a','b']
+  jsonStr = jsonStr.replace(/\[\s*'([^']*)'/g, '["$1"');
+  jsonStr = jsonStr.replace(/'([^']*?)'\s*([,\]])/g, '"$1"$2');
+
+  // Fix ] used instead of } to close an object
+  // Pattern: last property value followed by ] when } is expected
+  jsonStr = jsonStr.replace(/("(?:reasoning|rubric|difficulty|timeLimit|points|correctOption|type)"\s*:\s*(?:"[^"]*"|\d+))\s*\]/g, '$1\n    }');
+
+  // Strip comments
+  jsonStr = jsonStr
     .replace(/\/\/.*$/gm, '')
-    .replace(/\/\*[\s\S]*?\*\//g, '')
-    .replace(/,+(\s*[}\]])/g, '$1')   // fixed: removes ALL trailing commas in one pass
-    .replace(/,,/g, ',')
-    .replace(/`/g, "'")               // new: removes backticks from starterCode
-    .replace(/[\x00-\x1F\x7F]/g, '')
-    // Normalize smart quotes
-    .replace(/[“”]/g, '"')
-    .replace(/[‘’]/g, "'")
-    // Handle unquoted keys (basic)
-    .replace(/([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)(\s*:)/g, '$1"$2"$3')
-    // Handle single quotes for strings (basic)
-    .replace(/'([^'\\]*(?:\\.[^'\\]*)*)'/g, '"$1"')
-    // Normalize common non-JSON tokens
+    .replace(/\/\*[\s\S]*?\*\//g, '');
+
+  // Fix trailing commas
+  jsonStr = jsonStr.replace(/,+(\s*[}\]])/g, '$1');
+
+  // Fix backticks
+  jsonStr = jsonStr.replace(/`/g, '"');
+
+  // Normalize smart quotes
+  jsonStr = jsonStr.replace(/[""]/g, '"').replace(/['']/g, "'");
+
+  // Fix unquoted keys
+  jsonStr = jsonStr.replace(/([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)(\s*:)/g, '$1"$2"$3');
+
+  // Normalize Python booleans and nulls
+  jsonStr = jsonStr
     .replace(/:\s*True\s*([,}])/g, ': true$1')
     .replace(/:\s*False\s*([,}])/g, ': false$1')
     .replace(/:\s*NaN\s*([,}])/g, ': null$1')
-    .replace(/:\s*undefined\s*([,}])/g, ': null$1')
-    .replace(/:\s*\.\.\.\s*([,}])/g, ': null$1')
-    .replace(/:\s*null\s*([,}])/g, ': null$1');
+    .replace(/:\s*undefined\s*([,}])/g, ': null$1');
 
+  // Strategy 1: Direct parse
   try {
-    const parsed = JSON.parse(sanitized);
-    const rawQuestions = parsed.questions || (Array.isArray(parsed) ? parsed : []);
-    if (rawQuestions.length > 0) {
-      return rawQuestions.map(q => sanitizeQuestion(q));
-    }
-  } catch (e) {}
+    const parsed = JSON.parse(jsonStr);
+    const raw = parsed.questions || (Array.isArray(parsed) ? parsed : []);
+    if (raw.length > 0) return raw.map(q => sanitizeQuestion(q));
+  } catch (e) {
+    console.warn('[parseAIResponse] Strategy 1 failed:', e.message);
+  }
 
-  // Strategy 3: Extract ALL complete top-level objects from the questions array
-  const questionsStart = sanitized.indexOf('"questions"');
+  // Strategy 2: Extract individual objects from questions array
+  const questionsStart = jsonStr.indexOf('"questions"');
   let arrayContent = null;
   if (questionsStart !== -1) {
-    const searchFrom = sanitized.substring(questionsStart);
-    const bracketPos = searchFrom.indexOf('[');
-    if (bracketPos !== -1) {
-      arrayContent = searchFrom.substring(bracketPos);
-    }
+    const after = jsonStr.substring(questionsStart);
+    const bracketPos = after.indexOf('[');
+    if (bracketPos !== -1) arrayContent = after.substring(bracketPos);
   } else {
-    // Try to find the array directly
-    const arrayStart = sanitized.indexOf('[');
-    if (arrayStart !== -1) {
-      arrayContent = sanitized.substring(arrayStart);
-    }
+    const arrayStart = jsonStr.indexOf('[');
+    if (arrayStart !== -1) arrayContent = jsonStr.substring(arrayStart);
   }
-  
+
   if (arrayContent) {
     const objects = extractAllTopLevelObjects(arrayContent);
     if (objects.length > 0) {
-      const validObjects = [];
+      const valid = [];
       for (const objStr of objects) {
         try {
-          const parsedObj = JSON.parse(objStr);
-          if (parsedObj && typeof parsedObj === 'object') {
-            validObjects.push(sanitizeQuestion(parsedObj));
-          }
-        } catch (err) {
-          // Try sanitizing the individual object more aggressively
+          valid.push(sanitizeQuestion(JSON.parse(objStr)));
+        } catch {
           try {
-            let cleaned = objStr
-              .replace(/,(\s*[}\]])/g, '$1')
-              .replace(/([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)(\s*:)/g, '$1"$2"$3')
-              .replace(/'([^'\\]*(?:\\.[^'\\]*)*)'/g, '"$1"')
-              .replace(/[\u2018\u2019]/g, "'")
-              .replace(/[\u201C\u201D]/g, '"');
-            const parsedSanitized = JSON.parse(cleaned);
-            validObjects.push(sanitizeQuestion(parsedSanitized));
-          } catch (innerErr) {}
+            // Last resort: fix single quotes inside individual object
+            const cleaned = objStr
+              .replace(/:\s*'([^']*)'/g, ': "$1"')
+              .replace(/'([^']*?)'\s*([,\]])/g, '"$1"$2')
+              .replace(/,+(\s*[}\]])/g, '$1')
+              .replace(/([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)(\s*:)/g, '$1"$2"$3');
+            valid.push(sanitizeQuestion(JSON.parse(cleaned)));
+          } catch (inner) {
+            console.warn('[parseAIResponse] Could not parse object:', inner.message);
+          }
         }
       }
-      if (validObjects.length > 0) return validObjects;
+      if (valid.length > 0) return valid;
     }
   }
 
@@ -924,7 +920,7 @@ async function ensureQuestionCount(current, required, type, roleData) {
   const skills = roleData.skillsList || '';
   const diff = roleData.difficulty || 'medium';
   const mcqExtra = `Skills to test: ${skills}. Required difficulty: ${diff.toUpperCase()}. Avoid: ${coveredTopics}.`;
-  const codingExtra = `Required difficulties: ${(roleData.difficulties || [diff]).join(', ')}. Avoid topics already covered: ${coveredTopics}.`;
+ const codingExtra = `Generate EXACTLY ${missing} coding questions. Required difficulties: ${(roleData.difficulties || [diff]).join(', ')}. Avoid topics already covered: ${coveredTopics}.\n`;
   try {
     const content = await callAI(
       type === 'mcq'
@@ -932,7 +928,11 @@ async function ensureQuestionCount(current, required, type, roleData) {
         : codingExtra + '\n' + buildCodingFormat()
     );
     const parsed = parseAIResponse(content);
-    const add = parsed.filter(q => type === 'mcq' ? (q.type === 'mcq' || Array.isArray(q.options)) : isValidCodingQuestion(q));
+   const add = parsed.filter(q => 
+  type === 'mcq' 
+    ? (q.type === 'mcq' || Array.isArray(q.options)) 
+    : (isValidCodingQuestion(q) || (q.type === 'coding' && Array.isArray(q.testCases)))
+);
     return [...current, ...add].slice(0, required);
   } catch (err) {
     throw new Error(`Failed to generate additional ${type} questions: ${err.message}`);
