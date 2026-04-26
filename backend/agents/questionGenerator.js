@@ -648,20 +648,20 @@ function extractAllTopLevelObjects(str) {
 function isValidCodingQuestion(q, existingTitles = [], seniority = 'mid') {
   if (!q || q.type === 'mcq' || q.type === 'theory') return false;
   if (!Array.isArray(q.testCases) || q.testCases.length < 2) return false;
-  const fullText = (q.description || q.question || q.title || '');
-  const hasPlaceholders = 
-    fullText.includes('[named parameter]') ||
-    fullText.includes('[constraint 1') ||
-    fullText.includes('[constraint 2') ||
-    fullText.includes('[linked list]') ||
-    fullText.includes('[array of integers]') ||
-    fullText.includes('[why this is the answer]') ||
-    fullText.includes('[maximum number') ||
-    fullText.includes('[first element');
-  if (hasPlaceholders) {
+  const descText = (q.description || q.question || q.title || '');
+const hasPlaceholders = 
+    descText.includes('[named parameter]') ||
+    descText.includes('[constraint 1') ||
+    descText.includes('[constraint 2') ||
+    descText.includes('[linked list]') ||
+    descText.includes('[array of integers]') ||
+    descText.includes('[why this is the answer]') ||
+    descText.includes('[maximum number') ||
+    descText.includes('[first element');
+if (hasPlaceholders) {
     console.warn('[isValidCodingQuestion] Rejected placeholder question:', q.title);
     return false;
-  }
+}
   const titleOrDesc = (q.title || q.description || q.question || '').toLowerCase();
   const fullText = (q.title || q.description || q.question || '').toLowerCase();
 
