@@ -700,8 +700,6 @@ Required difficulties: ${codingDiffs.join(', ')}.
     console.warn(`[QuestionGenerator] MCQ generation failed: ${err.message}`);
   }
 
-let generatedCoding = [];
-
 const MAX_RETRIES = 3;
 
 for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
