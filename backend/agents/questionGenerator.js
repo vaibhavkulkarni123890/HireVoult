@@ -6,28 +6,28 @@ const path = require('path');
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 function getProviderPriority() {
-  const order = process.env.AI_PROVIDER_ORDER || 'gemini,openrouter,claude';
-  const allowed = new Set(['gemini', 'openrouter', 'claude', 'groq', 'nvidia']);
+  const order = process.env.AI_PROVIDER_ORDER || 'openrouter,claude';
+  const allowed = new Set(['openrouter','claude']);
   return order.split(',').map(p => p.trim().toLowerCase()).filter(p => allowed.has(p));
 }
 
 async function callOpenRouter(prompt) {
   const apiKey = process.env.OPENROUTER_API_KEY;
   if (!apiKey) throw new Error('OpenRouter API key not configured');
-  const modelName = process.env.OPENROUTER_MODEL_NAME || 'meta-llama/llama-3.3-70b-instruct';
+  const modelName = process.env.OPENROUTER_MODEL_NAME || 'google/gemini-2.0-flash-001';
   const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${apiKey}`,
-      'HTTP-Referer': 'https://hirevault.ai',
-      'X-Title': 'HireVault Assessment Generator'
+      'HTTP-Referer': 'https://hirevoult.ai',
+      'X-Title': 'HireVoult Assessment Generator'
     },
     body: JSON.stringify({
       model: modelName,
       messages: [{ role: 'user', content: prompt }],
       temperature: 0.3,
-      max_tokens: 7000
+      max_tokens: 4000
     })
   });
   if (!response.ok) {
@@ -102,38 +102,15 @@ async function callGROQ(prompt) {
 }
 
 async function callGEMINI(prompt) {
-  const modelsToTry = [
-    process.env.GEMINI_MODEL_NAME || 'gemini-1.5-flash',
-    'gemini-1.5-flash-latest',
-    'gemini-1.5-pro',
-    'gemini-1.5-pro-latest',
-    'gemini-pro',
-    'gemini-1.0-pro'
-  ];
-
-  let lastError;
-  for (const modelName of modelsToTry) {
-    try {
-      // Force 'v1' stable endpoint instead of 'v1beta' to avoid 404s
-      const model = genAI.getGenerativeModel({ model: modelName }, { apiVersion: 'v1' });
-      const result = await model.generateContent(prompt, {
-        temperature: 0.3,
-        maxOutputTokens: 3000,
-        candidateCount: 1
-      });
-      const candidate = result.response?.candidates?.[0];
-      const text = candidate?.content?.parts?.map(part => part.text || '').join('') || '';
-      if (text) return text;
-    } catch (err) {
-      console.warn(`[QuestionGenerator] Gemini model ${modelName} failed: ${err.message}`);
-      lastError = err;
-      if (err.message.includes('404') || err.message.toLowerCase().includes('not found')) {
-        continue;
-      }
-      throw err;
-    }
-  }
-  throw lastError;
+  const modelName = process.env.GEMINI_MODEL_NAME || 'gemini-1.5-flash';
+  const model = genAI.getGenerativeModel({ model: modelName });
+  const result = await model.generateContent(prompt, {
+    temperature: 0.3,
+    maxOutputTokens: 3000,
+    candidateCount: 1
+  });
+  const candidate = result.response?.candidates?.[0];
+  return candidate?.content?.parts?.map(part => part.text || '').join('') || '';
 }
 
 async function callClaude(prompt) {
@@ -148,7 +125,7 @@ async function callClaude(prompt) {
     },
     body: JSON.stringify({
       model: process.env.CLAUDE_MODEL_NAME || 'claude-3-5-sonnet-20241022',
-      max_tokens: 7000,
+      max_tokens: 3000,
       temperature: 0.3,
       messages: [{ role: 'user', content: prompt }]
     })
@@ -466,146 +443,105 @@ OUTPUT FORMAT (STRICT JSON)
 Return ONLY JSON.
 `;
 }
-function fixControlCharsInJsonStrings(str) {
-  let result = '';
-  let inString = false;
-  let escaped = false;
 
-  for (let i = 0; i < str.length; i++) {
-    const ch = str[i];
-    const code = str.charCodeAt(i);
-
-    if (escaped) {
-      result += ch;
-      escaped = false;
-      continue;
-    }
-
-    if (ch === '\\' && inString) {
-      result += ch;
-      escaped = true;
-      continue;
-    }
-
-    if (ch === '"') {
-      inString = !inString;
-      result += ch;
-      continue;
-    }
-
-    if (inString) {
-      // Replace raw control characters with their escaped versions
-      if (ch === '\n') { result += '\\n'; continue; }
-      if (ch === '\r') { result += '\\r'; continue; }
-      if (ch === '\t') { result += '\\t'; continue; }
-      if (code < 0x20) { result += '\\u' + code.toString(16).padStart(4, '0'); continue; }
-    }
-
-    result += ch;
-  }
-
-  return result;
-}
 function parseAIResponse(content) {
-  if (!content) throw new Error('AI returned empty content');
-
-  console.warn('[parseAIResponse] Raw length:', content.length);
-  console.warn('[parseAIResponse] Start:', content.slice(0, 300));
-  console.warn('[parseAIResponse] End:', content.slice(-200));
+  if (!content) {
+    throw new Error('AI returned empty content');
+  }
 
   let jsonStr = content.trim();
 
-  // Strip markdown fences
-// Fix bad control characters inside JSON strings (newlines, tabs, etc.)
-jsonStr = fixControlCharsInJsonStrings(jsonStr);;
+  // Strip all markdown code fences first (handles ```json at start)
+  jsonStr = jsonStr.replace(/^```(?:json)?\s*/m, '').replace(/\s*```$/m, '').trim();
 
-  // Extract JSON object
+  // Try to find the JSON part if there is preamble or postamble
   const jsonMatch = jsonStr.match(/\{[\s\S]*\}/);
-  if (jsonMatch) jsonStr = jsonMatch[0].trim();
-
-  // Fix unescaped newlines inside string values
-  jsonStr = jsonStr.replace(/:(\s*)"([\s\S]*?)"/g, (match, space, val) => {
-    const fixed = val
-      .replace(/\n/g, '\\n')
-      .replace(/\r/g, '\\r')
-      .replace(/\t/g, '\\t');
-    return `:${space}"${fixed}"`;
-  });
-
-  // Fix single-quoted string values  e.g.  "key": 'value'  or  "key": ''
-  jsonStr = jsonStr.replace(/:\s*'([^']*)'/g, ': "$1"');
-  // Fix single-quoted inside arrays  ['a','b']
-  jsonStr = jsonStr.replace(/\[\s*'([^']*)'/g, '["$1"');
-  jsonStr = jsonStr.replace(/'([^']*?)'\s*([,\]])/g, '"$1"$2');
-
-  // Fix ] used instead of } to close an object
-  // Pattern: last property value followed by ] when } is expected
-  jsonStr = jsonStr.replace(/("(?:reasoning|rubric|difficulty|timeLimit|points|correctOption|type)"\s*:\s*(?:"[^"]*"|\d+))\s*\]/g, '$1\n    }');
-
-  // Strip comments
-  jsonStr = jsonStr
-    .replace(/\/\/.*$/gm, '')
-    .replace(/\/\*[\s\S]*?\*\//g, '');
-
-  // Fix trailing commas
-  jsonStr = jsonStr.replace(/,+(\s*[}\]])/g, '$1');
-
-  // Fix backticks
-  jsonStr = jsonStr.replace(/`/g, '"');
-
-  // Normalize smart quotes
-  jsonStr = jsonStr.replace(/[""]/g, '"').replace(/['']/g, "'");
-
-  // Fix unquoted keys
-  jsonStr = jsonStr.replace(/([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)(\s*:)/g, '$1"$2"$3');
-
-  // Normalize Python booleans and nulls
- // Strip ALL markdown fences aggressively
-jsonStr = jsonStr.replace(/```json\s*/gi, '').replace(/```\s*/gi, '').trim();
+  if (jsonMatch) {
+    jsonStr = jsonMatch[0].trim();
+  }
 
   // Strategy 1: Direct parse
   try {
     const parsed = JSON.parse(jsonStr);
-    const raw = parsed.questions || (Array.isArray(parsed) ? parsed : []);
-    if (raw.length > 0) return raw.map(q => sanitizeQuestion(q));
-  } catch (e) {
-    console.warn('[parseAIResponse] Strategy 1 failed:', e.message);
-  }
+    const rawQuestions = parsed.questions || (Array.isArray(parsed) ? parsed : []);
+    if (rawQuestions.length > 0) {
+      return rawQuestions.map(q => sanitizeQuestion(q));
+    }
+  } catch (e) {}
 
-  // Strategy 2: Extract individual objects from questions array
-  const questionsStart = jsonStr.indexOf('"questions"');
+  // Strategy 2: Sanitize and parse
+  const sanitized = jsonStr
+    .replace(/\/\/.*$/gm, '')
+    .replace(/\/\*[\s\S]*?\*\//g, '')
+    .replace(/,(\s*[}\]])/g, '$1')
+    .replace(/,(\s*[}\]])/g, '$1')
+    .replace(/,,/g, ',')
+    .replace(/[\x00-\x1F\x7F]/g, '')
+    // Normalize smart quotes
+    .replace(/[“”]/g, '"')
+    .replace(/[‘’]/g, "'")
+    // Handle unquoted keys (basic)
+    .replace(/([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)(\s*:)/g, '$1"$2"$3')
+    // Handle single quotes for strings (basic)
+    .replace(/'([^'\\]*(?:\\.[^'\\]*)*)'/g, '"$1"')
+    // Normalize common non-JSON tokens
+    .replace(/:\s*True\s*([,}])/g, ': true$1')
+    .replace(/:\s*False\s*([,}])/g, ': false$1')
+    .replace(/:\s*NaN\s*([,}])/g, ': null$1')
+    .replace(/:\s*undefined\s*([,}])/g, ': null$1')
+    .replace(/:\s*\.\.\.\s*([,}])/g, ': null$1')
+    .replace(/:\s*null\s*([,}])/g, ': null$1');
+
+  try {
+    const parsed = JSON.parse(sanitized);
+    const rawQuestions = parsed.questions || (Array.isArray(parsed) ? parsed : []);
+    if (rawQuestions.length > 0) {
+      return rawQuestions.map(q => sanitizeQuestion(q));
+    }
+  } catch (e) {}
+
+  // Strategy 3: Extract ALL complete top-level objects from the questions array
+  const questionsStart = sanitized.indexOf('"questions"');
   let arrayContent = null;
   if (questionsStart !== -1) {
-    const after = jsonStr.substring(questionsStart);
-    const bracketPos = after.indexOf('[');
-    if (bracketPos !== -1) arrayContent = after.substring(bracketPos);
+    const searchFrom = sanitized.substring(questionsStart);
+    const bracketPos = searchFrom.indexOf('[');
+    if (bracketPos !== -1) {
+      arrayContent = searchFrom.substring(bracketPos);
+    }
   } else {
-    const arrayStart = jsonStr.indexOf('[');
-    if (arrayStart !== -1) arrayContent = jsonStr.substring(arrayStart);
+    // Try to find the array directly
+    const arrayStart = sanitized.indexOf('[');
+    if (arrayStart !== -1) {
+      arrayContent = sanitized.substring(arrayStart);
+    }
   }
-
+  
   if (arrayContent) {
     const objects = extractAllTopLevelObjects(arrayContent);
     if (objects.length > 0) {
-      const valid = [];
+      const validObjects = [];
       for (const objStr of objects) {
         try {
-          valid.push(sanitizeQuestion(JSON.parse(objStr)));
-        } catch {
-          try {
-            // Last resort: fix single quotes inside individual object
-            const cleaned = objStr
-              .replace(/:\s*'([^']*)'/g, ': "$1"')
-              .replace(/'([^']*?)'\s*([,\]])/g, '"$1"$2')
-              .replace(/,+(\s*[}\]])/g, '$1')
-              .replace(/([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)(\s*:)/g, '$1"$2"$3');
-            valid.push(sanitizeQuestion(JSON.parse(cleaned)));
-          } catch (inner) {
-            console.warn('[parseAIResponse] Could not parse object:', inner.message);
+          const parsedObj = JSON.parse(objStr);
+          if (parsedObj && typeof parsedObj === 'object') {
+            validObjects.push(sanitizeQuestion(parsedObj));
           }
+        } catch (err) {
+          // Try sanitizing the individual object more aggressively
+          try {
+            let cleaned = objStr
+              .replace(/,(\s*[}\]])/g, '$1')
+              .replace(/([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)(\s*:)/g, '$1"$2"$3')
+              .replace(/'([^'\\]*(?:\\.[^'\\]*)*)'/g, '"$1"')
+              .replace(/[\u2018\u2019]/g, "'")
+              .replace(/[\u201C\u201D]/g, '"');
+            const parsedSanitized = JSON.parse(cleaned);
+            validObjects.push(sanitizeQuestion(parsedSanitized));
+          } catch (innerErr) {}
         }
       }
-      if (valid.length > 0) return valid;
+      if (validObjects.length > 0) return validObjects;
     }
   }
 
@@ -688,20 +624,6 @@ function extractAllTopLevelObjects(str) {
 function isValidCodingQuestion(q, existingTitles = [], seniority = 'mid') {
   if (!q || q.type === 'mcq' || q.type === 'theory') return false;
   if (!Array.isArray(q.testCases) || q.testCases.length < 2) return false;
-  const descText = (q.description || q.question || q.title || '');
-const hasPlaceholders = 
-    descText.includes('[named parameter]') ||
-    descText.includes('[constraint 1') ||
-    descText.includes('[constraint 2') ||
-    descText.includes('[linked list]') ||
-    descText.includes('[array of integers]') ||
-    descText.includes('[why this is the answer]') ||
-    descText.includes('[maximum number') ||
-    descText.includes('[first element');
-if (hasPlaceholders) {
-    console.warn('[isValidCodingQuestion] Rejected placeholder question:', q.title);
-    return false;
-}
   const titleOrDesc = (q.title || q.description || q.question || '').toLowerCase();
   const fullText = (q.title || q.description || q.question || '').toLowerCase();
 
@@ -966,53 +888,22 @@ Each section MUST start on a new line with the section header followed by a colo
 
 async function ensureQuestionCount(current, required, type, roleData) {
   if (current.length >= required) return current;
-  
   const missing = required - current.length;
-  const coveredTopics = current
-    .map(q => (q.title || q.question || '').split(' ').slice(0, 5).join(' '))
-    .join(', ');
+  const coveredTopics = current.map(q => (q.title || q.question || '').split(' ').slice(0, 5).join(' ')).join(', ');
   const skills = roleData.skillsList || '';
   const diff = roleData.difficulty || 'medium';
-
-  console.log(`[ensureQuestionCount] Generating ${missing} more ${type} questions`);
-
+  const mcqExtra = `Skills to test: ${skills}. Required difficulty: ${diff.toUpperCase()}. Avoid: ${coveredTopics}.`;
+  const codingExtra = `Required difficulties: ${(roleData.difficulties || [diff]).join(', ')}. Avoid topics already covered: ${coveredTopics}.`;
   try {
-    let prompt;
-
-    if (type === 'mcq') {
-      prompt = `Generate EXACTLY ${missing} technical MCQ questions for skills: ${skills}.
-Required difficulty: ${diff.toUpperCase()}.
-Avoid these already covered topics: ${coveredTopics}.
-
-${buildMCQFormat()}`;
-    } else {
-      const difficulties = (roleData.difficulties || [diff]).slice(0, missing);
-      
-      // Use the FULL coding prompt — same as original generateQuestions
-      prompt = `You are generating ${missing} algorithmic coding questions for a hiring assessment targeting these skills: ${skills}.
-Required difficulties: ${difficulties.join(', ')}.
-Avoid these already covered topics: ${coveredTopics}.
-
-CRITICAL: Do NOT use placeholder text like [named parameter], [constraint 1], [linked list], [array of integers] etc.
-Write REAL concrete problem statements with actual variable names, real constraints (e.g. 1 <= n <= 1000), and real examples.
-
-${buildCodingFormat()}`;
-    }
-
-    const content = await callAI(prompt);
-    const parsed = parseAIResponse(content);
-
-    const add = parsed.filter(q =>
+    const content = await callAI(
       type === 'mcq'
-        ? (q.type === 'mcq' || Array.isArray(q.options))
-        : isValidCodingQuestion(q, current.map(x => (x.title || '').toLowerCase()))
+        ? mcqExtra + '\n' + buildMCQFormat()
+        : codingExtra + '\n' + buildCodingFormat()
     );
-
-    console.log(`[ensureQuestionCount] Got ${add.length} valid ${type} questions`);
+    const parsed = parseAIResponse(content);
+    const add = parsed.filter(q => type === 'mcq' ? (q.type === 'mcq' || Array.isArray(q.options)) : isValidCodingQuestion(q));
     return [...current, ...add].slice(0, required);
-
   } catch (err) {
-    console.warn(`[ensureQuestionCount] Failed: ${err.message}`);
     throw new Error(`Failed to generate additional ${type} questions: ${err.message}`);
   }
 }
