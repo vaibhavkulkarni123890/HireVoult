@@ -590,7 +590,10 @@ function extractAllTopLevelObjects(str) {
   return objects;
 }
 
-function isValidCodingQuestion(q, existingTitles = [], seniority = 'mid') {
+function isValidCodingQuestion(q, existingTitles = [], allowedDifficulties = ['easy','medium','hard']) {
+  if (!allowedDifficulties.includes((q.difficulty || '').toLowerCase())) {
+  return false;
+}
   if (!q || q.type === 'mcq' || q.type === 'theory') return false;
   if (!Array.isArray(q.testCases) || q.testCases.length < 2) return false;
   const descText = (q.description || q.question || q.title || '');
@@ -630,18 +633,7 @@ if (hasPlaceholders) {
   if (isNonDSA) return false;
 
 // Filter out ONLY extremely trivial problems for Junior roles
-if (seniority.toLowerCase() === 'junior') {
-  const toyProblems = [
-    'fizzbuzz',
-    'check prime',
-    'power of two'
-  ];
 
-  // Reject ONLY if exact trivial match
-  if (toyProblems.some(toy => titleOrDesc.trim() === toy)) {
-    return false;
-  }
-}
 
   if (existingTitles.includes(titleOrDesc)) return false;
   return true;
@@ -660,15 +652,23 @@ async function generateQuestions(role) {
   const salaryMin  = salary?.min || 0;
 
   const salaryBand = salaryMin >= 1000000 ? '10L+' : salaryMin >= 400000 ? '4-10L' : '0-4L';
-  const seniority  = (seniorityLevel || 'mid').toLowerCase();
+const seniorityRaw = (seniorityLevel || '').toLowerCase();
+const isUnspecified = !seniorityRaw || seniorityRaw === 'unspecified';
 
-  function pickDifficulty(defaultDiff) {
-    return defaultDiff || 'medium';
+let allowedDifficulties = ['easy', 'medium']; // default
+
+if (!isUnspecified) {
+  if (seniorityRaw === 'junior') {
+    allowedDifficulties = ['easy'];
+  } else if (seniorityRaw === 'mid') {
+    allowedDifficulties = ['easy', 'medium'];
+  } else if (seniorityRaw === 'senior') {
+    allowedDifficulties = ['medium', 'hard'];
   }
-
-  const codingDiffs = Array.isArray(codingConfig.questions)
-    ? codingConfig.questions.map(q => pickDifficulty((q.difficulty || 'medium').toLowerCase()))
-    : Array(codingCount).fill(pickDifficulty((codingConfig.difficulty || 'medium').toLowerCase()));
+}
+const codingDiffs = Array(codingCount).fill().map((_, i) => {
+  return allowedDifficulties[i % allowedDifficulties.length];
+});
 
   const mcqDiff = pickDifficulty((mcqConfig.difficulty || 'medium').toLowerCase());
 
@@ -685,7 +685,7 @@ Seniority: ${seniority || 'mid'}-level.
 Required difficulty: ${mcqDiff.toUpperCase()}.
 
 ` + buildMCQFormat();
-  const codingPrompt = `You are generating ${codingCount} algorithmic coding questions for a hiring assessment targeting these skills: ${skillsList}.
+  let codingPrompt = `You are generating ${codingCount} algorithmic coding questions for a hiring assessment targeting these skills: ${skillsList}.
 Required difficulties: ${codingDiffs.join(', ')}.
 ` + buildCodingFormat();
 
@@ -710,9 +710,9 @@ for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
 
     const parsed = parseAIResponse(content);
 
-    const filtered = parsed.filter(q =>
-      isValidCodingQuestion(q)
-    );
+   const filtered = parsed.filter(q =>
+  isValidCodingQuestion(q, [], allowedDifficulties)
+);
 
     if (filtered.length >= codingCount) {
       generatedCoding = filtered.slice(0, codingCount);
@@ -756,7 +756,11 @@ if (generatedCoding.length < codingCount) {
     const tmpCoding = await ensureQuestionCount(generatedCoding, codingCount, 'coding', { skillsList, difficulties: codingDiffs });
     console.log(`[QuestionGenerator] ensureQuestionCount returned ${tmpCoding.length} coding (was ${generatedCoding.length})`);
     generatedCoding = tmpCoding
-      .filter((q, i, arr) => isValidCodingQuestion(q, generatedCoding.slice(0, i).map(x => (x.title || x.description || x.question || '').toLowerCase())))
+      .filter((q, i, arr) => isValidCodingQuestion(
+  q,
+  generatedCoding.slice(0, i).map(x => (x.title || x.description || x.question || '').toLowerCase()),
+  allowedDifficulties
+))
       .map((q, i) => {
         const diff = (codingDiffs[generatedCoding.length + i] || 'medium').toLowerCase();
         q.difficulty = diff;
@@ -767,6 +771,14 @@ if (generatedCoding.length < codingCount) {
       })
       .slice(0, codingCount);
   }
+// 🔥 ADD HERE (IMPORTANT)
+generatedCoding = generatedCoding.filter(q =>
+  allowedDifficulties.includes((q.difficulty || '').toLowerCase())
+);
+
+generatedMCQs = generatedMCQs.filter(q =>
+  allowedDifficulties.includes((q.difficulty || '').toLowerCase())
+);
 
   const finalQuestions = [
     ...generatedMCQs.map(q => sanitizeQuestion({ ...q, type: 'mcq' })),
