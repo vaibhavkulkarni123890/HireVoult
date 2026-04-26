@@ -466,7 +466,46 @@ OUTPUT FORMAT (STRICT JSON)
 Return ONLY JSON.
 `;
 }
+function fixControlCharsInJsonStrings(str) {
+  let result = '';
+  let inString = false;
+  let escaped = false;
 
+  for (let i = 0; i < str.length; i++) {
+    const ch = str[i];
+    const code = str.charCodeAt(i);
+
+    if (escaped) {
+      result += ch;
+      escaped = false;
+      continue;
+    }
+
+    if (ch === '\\' && inString) {
+      result += ch;
+      escaped = true;
+      continue;
+    }
+
+    if (ch === '"') {
+      inString = !inString;
+      result += ch;
+      continue;
+    }
+
+    if (inString) {
+      // Replace raw control characters with their escaped versions
+      if (ch === '\n') { result += '\\n'; continue; }
+      if (ch === '\r') { result += '\\r'; continue; }
+      if (ch === '\t') { result += '\\t'; continue; }
+      if (code < 0x20) { result += '\\u' + code.toString(16).padStart(4, '0'); continue; }
+    }
+
+    result += ch;
+  }
+
+  return result;
+}
 function parseAIResponse(content) {
   if (!content) throw new Error('AI returned empty content');
 
@@ -477,7 +516,8 @@ function parseAIResponse(content) {
   let jsonStr = content.trim();
 
   // Strip markdown fences
-  jsonStr = jsonStr.replace(/^```(?:json)?\s*/m, '').replace(/\s*```\s*$/m, '').trim();
+// Fix bad control characters inside JSON strings (newlines, tabs, etc.)
+jsonStr = fixControlCharsInJsonStrings(jsonStr);;
 
   // Extract JSON object
   const jsonMatch = jsonStr.match(/\{[\s\S]*\}/);
