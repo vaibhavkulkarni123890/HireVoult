@@ -1,33 +1,35 @@
 const fetch = require('node-fetch');
-const { GoogleGenerativeAI } = require('@google/generative-ai');
+// const { GoogleGenerativeAI } = require('@google/generative-ai'); // Removed Gemini
+
 const fs = require('fs');
 const path = require('path');
 
 const genAI = new GoogleGenerativeAI(process.env.GEMINI_API_KEY);
 
 function getProviderPriority() {
-  const order = process.env.AI_PROVIDER_ORDER || 'openrouter,claude';
-  const allowed = new Set(['openrouter','claude']);
+  const order = process.env.AI_PROVIDER_ORDER || 'claude,openrouter';
+  const allowed = new Set(['claude', 'openrouter', 'groq', 'nvidia']);
   return order.split(',').map(p => p.trim().toLowerCase()).filter(p => allowed.has(p));
 }
+
 
 async function callOpenRouter(prompt) {
   const apiKey = process.env.OPENROUTER_API_KEY;
   if (!apiKey) throw new Error('OpenRouter API key not configured');
-  const modelName = process.env.OPENROUTER_MODEL_NAME || 'google/gemini-2.0-flash-001';
+  const modelName = process.env.OPENROUTER_MODEL_NAME || 'anthropic/claude-3.5-sonnet';
   const response = await fetch('https://openrouter.ai/api/v1/chat/completions', {
     method: 'POST',
     headers: {
       'Content-Type': 'application/json',
       'Authorization': `Bearer ${apiKey}`,
-      'HTTP-Referer': 'https://hirevoult.ai',
-      'X-Title': 'HireVoult Assessment Generator'
+      'HTTP-Referer': 'https://hirevault.ai',
+      'X-Title': 'HireVault Assessment Generator'
     },
     body: JSON.stringify({
       model: modelName,
       messages: [{ role: 'user', content: prompt }],
-      temperature: 0.3,
-      max_tokens: 4000
+      temperature: 0.1, // Lower temperature for more consistent JSON
+      max_tokens: 5000
     })
   });
   if (!response.ok) {
@@ -37,6 +39,7 @@ async function callOpenRouter(prompt) {
   const data = await response.json();
   return data.choices?.[0]?.message?.content || '';
 }
+
 
 async function callNVIDIA(prompt) {
   const modelName = process.env.LLM_MODEL_NAME || 'meta/llama-3.1-405b-instruct';
@@ -101,17 +104,8 @@ async function callGROQ(prompt) {
   throw new Error('Groq API rate limit exceeded after retries');
 }
 
-async function callGEMINI(prompt) {
-  const modelName = process.env.GEMINI_MODEL_NAME || 'gemini-1.5-flash';
-  const model = genAI.getGenerativeModel({ model: modelName });
-  const result = await model.generateContent(prompt, {
-    temperature: 0.3,
-    maxOutputTokens: 3000,
-    candidateCount: 1
-  });
-  const candidate = result.response?.candidates?.[0];
-  return candidate?.content?.parts?.map(part => part.text || '').join('') || '';
-}
+// Removed callGEMINI function
+
 
 async function callClaude(prompt) {
   const apiKey = process.env.ANTHROPIC_API_KEY;
@@ -125,7 +119,7 @@ async function callClaude(prompt) {
     },
     body: JSON.stringify({
       model: process.env.CLAUDE_MODEL_NAME || 'claude-3-5-sonnet-20241022',
-      max_tokens: 3000,
+      max_tokens: 7000,
       temperature: 0.3,
       messages: [{ role: 'user', content: prompt }]
     })
@@ -147,8 +141,8 @@ async function callAI(prompt) {
       if (provider === 'claude')   content = await callClaude(prompt);
       else if (provider === 'groq') content = await callGROQ(prompt);
       else if (provider === 'openrouter') content = await callOpenRouter(prompt);
-      else if (provider === 'gemini') content = await callGEMINI(prompt);
       else if (provider === 'nvidia') content = await callNVIDIA(prompt);
+
       if (content) return content;
     } catch (err) {
       console.warn(`[QuestionGenerator] ${provider} failed: ${err.message}`);
@@ -443,110 +437,97 @@ OUTPUT FORMAT (STRICT JSON)
 Return ONLY JSON.
 `;
 }
+function fixControlCharsInJsonStrings(str) {
+  let result = '';
+  let inString = false;
+  let escaped = false;
 
-function parseAIResponse(content) {
-  if (!content) {
-    throw new Error('AI returned empty content');
+  for (let i = 0; i < str.length; i++) {
+    const ch = str[i];
+    const code = str.charCodeAt(i);
+
+    if (escaped) {
+      result += ch;
+      escaped = false;
+      continue;
+    }
+
+    if (ch === '\\' && inString) {
+      result += ch;
+      escaped = true;
+      continue;
+    }
+
+    if (ch === '"') {
+      inString = !inString;
+      result += ch;
+      continue;
+    }
+
+    if (inString) {
+      // Replace raw control characters with their escaped versions
+      if (ch === '\n') { result += '\\n'; continue; }
+      if (ch === '\r') { result += '\\r'; continue; }
+      if (ch === '\t') { result += '\\t'; continue; }
+      if (code < 0x20) { result += '\\u' + code.toString(16).padStart(4, '0'); continue; }
+    }
+
+    result += ch;
   }
+
+  return result;
+}
+function parseAIResponse(content) {
+  if (!content) throw new Error('AI returned empty content');
 
   let jsonStr = content.trim();
 
-  // Strip all markdown code fences first (handles ```json at start)
-  jsonStr = jsonStr.replace(/^```(?:json)?\s*/m, '').replace(/\s*```$/m, '').trim();
+  // Strip markdown fences aggressively
+  jsonStr = jsonStr.replace(/```json\s*/gi, '').replace(/```\s*/gi, '').trim();
 
-  // Try to find the JSON part if there is preamble or postamble
-  const jsonMatch = jsonStr.match(/\{[\s\S]*\}/);
+  // Strategy 1: Attempt to find a complete JSON object/array
+  const jsonMatch = jsonStr.match(/[\{\[]([\s\S]*)[\}\]]/);
   if (jsonMatch) {
-    jsonStr = jsonMatch[0].trim();
-  }
-
-  // Strategy 1: Direct parse
-  try {
-    const parsed = JSON.parse(jsonStr);
-    const rawQuestions = parsed.questions || (Array.isArray(parsed) ? parsed : []);
-    if (rawQuestions.length > 0) {
-      return rawQuestions.map(q => sanitizeQuestion(q));
-    }
-  } catch (e) {}
-
-  // Strategy 2: Sanitize and parse
-  const sanitized = jsonStr
-    .replace(/\/\/.*$/gm, '')
-    .replace(/\/\*[\s\S]*?\*\//g, '')
-    .replace(/,(\s*[}\]])/g, '$1')
-    .replace(/,(\s*[}\]])/g, '$1')
-    .replace(/,,/g, ',')
-    .replace(/[\x00-\x1F\x7F]/g, '')
-    // Normalize smart quotes
-    .replace(/[“”]/g, '"')
-    .replace(/[‘’]/g, "'")
-    // Handle unquoted keys (basic)
-    .replace(/([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)(\s*:)/g, '$1"$2"$3')
-    // Handle single quotes for strings (basic)
-    .replace(/'([^'\\]*(?:\\.[^'\\]*)*)'/g, '"$1"')
-    // Normalize common non-JSON tokens
-    .replace(/:\s*True\s*([,}])/g, ': true$1')
-    .replace(/:\s*False\s*([,}])/g, ': false$1')
-    .replace(/:\s*NaN\s*([,}])/g, ': null$1')
-    .replace(/:\s*undefined\s*([,}])/g, ': null$1')
-    .replace(/:\s*\.\.\.\s*([,}])/g, ': null$1')
-    .replace(/:\s*null\s*([,}])/g, ': null$1');
-
-  try {
-    const parsed = JSON.parse(sanitized);
-    const rawQuestions = parsed.questions || (Array.isArray(parsed) ? parsed : []);
-    if (rawQuestions.length > 0) {
-      return rawQuestions.map(q => sanitizeQuestion(q));
-    }
-  } catch (e) {}
-
-  // Strategy 3: Extract ALL complete top-level objects from the questions array
-  const questionsStart = sanitized.indexOf('"questions"');
-  let arrayContent = null;
-  if (questionsStart !== -1) {
-    const searchFrom = sanitized.substring(questionsStart);
-    const bracketPos = searchFrom.indexOf('[');
-    if (bracketPos !== -1) {
-      arrayContent = searchFrom.substring(bracketPos);
-    }
-  } else {
-    // Try to find the array directly
-    const arrayStart = sanitized.indexOf('[');
-    if (arrayStart !== -1) {
-      arrayContent = sanitized.substring(arrayStart);
+    const potentialJson = jsonMatch[0];
+    try {
+      const parsed = JSON.parse(potentialJson);
+      const raw = parsed.questions || (Array.isArray(parsed) ? parsed : []);
+      if (raw.length > 0) return raw.map(q => sanitizeQuestion(q));
+    } catch (e) {
+      // If parsing fails, it might be truncated. Continue to Strategy 2.
     }
   }
-  
-  if (arrayContent) {
-    const objects = extractAllTopLevelObjects(arrayContent);
-    if (objects.length > 0) {
-      const validObjects = [];
-      for (const objStr of objects) {
+
+  // Strategy 2: Extract individual objects using a robust balancer
+  const objects = extractAllTopLevelObjects(jsonStr);
+  if (objects.length > 0) {
+    const valid = [];
+    for (const objStr of objects) {
+      try {
+        // Clean each object before parsing
+        let cleaned = objStr
+          .replace(/:\s*'([^']*)'/g, ': "$1"') // single quotes to double
+          .replace(/'([^']*?)'\s*([,\]])/g, '"$1"$2')
+          .replace(/([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)(\s*:)/g, '$1"$2"$3') // unquoted keys
+          .replace(/,+(\s*[}\]])/g, '$1'); // trailing commas
+
+        valid.push(sanitizeQuestion(JSON.parse(cleaned)));
+      } catch (inner) {
+        // Try a last ditch effort to close unclosed strings/objects if truncated
         try {
-          const parsedObj = JSON.parse(objStr);
-          if (parsedObj && typeof parsedObj === 'object') {
-            validObjects.push(sanitizeQuestion(parsedObj));
-          }
-        } catch (err) {
-          // Try sanitizing the individual object more aggressively
-          try {
-            let cleaned = objStr
-              .replace(/,(\s*[}\]])/g, '$1')
-              .replace(/([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)(\s*:)/g, '$1"$2"$3')
-              .replace(/'([^'\\]*(?:\\.[^'\\]*)*)'/g, '"$1"')
-              .replace(/[\u2018\u2019]/g, "'")
-              .replace(/[\u201C\u201D]/g, '"');
-            const parsedSanitized = JSON.parse(cleaned);
-            validObjects.push(sanitizeQuestion(parsedSanitized));
-          } catch (innerErr) {}
-        }
+          let fixed = objStr;
+          if ((fixed.match(/"/g) || []).length % 2 !== 0) fixed += '"';
+          if ((fixed.match(/\{/g) || []).length > (fixed.match(/\}/g) || []).length) fixed += '}'.repeat((fixed.match(/\{/g) || []).length - (fixed.match(/\}/g) || []).length);
+          valid.push(sanitizeQuestion(JSON.parse(fixed)));
+        } catch (f) {}
       }
-      if (validObjects.length > 0) return validObjects;
     }
+    if (valid.length > 0) return valid;
   }
 
-  throw new Error('Invalid JSON format received from AI. Please try again.');
+  throw new Error('Could not parse any valid questions from AI response.');
 }
+
 
 function extractAllTopLevelObjects(str) {
   const objects = [];
@@ -624,6 +605,20 @@ function extractAllTopLevelObjects(str) {
 function isValidCodingQuestion(q, existingTitles = [], seniority = 'mid') {
   if (!q || q.type === 'mcq' || q.type === 'theory') return false;
   if (!Array.isArray(q.testCases) || q.testCases.length < 2) return false;
+  const descText = (q.description || q.question || q.title || '');
+const hasPlaceholders = 
+    descText.includes('[named parameter]') ||
+    descText.includes('[constraint 1') ||
+    descText.includes('[constraint 2') ||
+    descText.includes('[linked list]') ||
+    descText.includes('[array of integers]') ||
+    descText.includes('[why this is the answer]') ||
+    descText.includes('[maximum number') ||
+    descText.includes('[first element');
+if (hasPlaceholders) {
+    console.warn('[isValidCodingQuestion] Rejected placeholder question:', q.title);
+    return false;
+}
   const titleOrDesc = (q.title || q.description || q.question || '').toLowerCase();
   const fullText = (q.title || q.description || q.question || '').toLowerCase();
 
@@ -783,127 +778,131 @@ Required difficulties: ${codingDiffs.join(', ')}.
 }
 
 function buildMCQFormat() {
-  return `CRITICAL: Every question must test a CONCEPT, SYNTAX, ALGORITHM, or COMPARISON from the required skills. NEVER mention company names, job titles, projects, role descriptions, or daily tasks.
-
-MCQ OPTION QUALITY RULES:
-- All 4 options must be technically plausible to someone who partially understands the concept.
-- Wrong options must represent common misconceptions or close-but-incorrect alternatives.
-- GOOD wrong option: "To handle state changes in a component" (close but wrong for useEffect).
-- BAD wrong option: "To create a new component" (obviously wrong).
-- Test: A developer with 6 months experience should need to think to identify the correct answer.
-- The correct answer should not be immediately obvious — it should require genuine knowledge.
-
-GOOD: "What is the output of typeof [] in JavaScript?"
-BAD: "What language is used in the ACME project?" ❌
+  return `CRITICAL: Every question must test a CONCEPT, SYNTAX, ALGORITHM, or COMPARISON.
+NEVER mention company names, job titles, role descriptions, or projects.
 
 Output ONLY valid JSON in this format:
 {
   "questions": [
     {
       "type": "mcq",
-      "question": "Full technical question here?",
-      "options": ["Correct answer", "Wrong answer A", "Wrong answer B", "Wrong answer C"],
+      "question": "What is the primary difference between 'let' and 'var' in JavaScript?",
+      "options": [
+        "let is block-scoped, while var is function-scoped",
+        "var is block-scoped, while let is function-scoped",
+        "let cannot be reassigned, while var can",
+        "There is no difference"
+      ],
       "correctOption": 0,
-      "difficulty": "easy|medium|hard",
+      "difficulty": "easy",
       "timeLimit": 90,
       "points": 5,
-      "reasoning": "Tests X concept from the required skills."
+      "reasoning": "Tests understanding of ES6 scoping rules."
     }
   ]
 }`;
 }
 
+
 function buildCodingFormat() {
-  return `STRICT OUTPUT: Return ONLY a raw JSON object — no markdown code fences, no prose before/after, no backticks.
+  return `STRICT OUTPUT: Return ONLY a raw JSON object — no markdown code fences, no prose before/after.
 
-CRITICAL RESTRICTION — DSA/ALGORITHMS ONLY:
-- !! FORBIDDEN !!: HTML parsing, CSS manipulation, DOM manipulation, React/Vue components, UI problems
-- !! FORBIDDEN !!: File system access, networking, server-side code, SQL queries
-- !! FORBIDDEN !!: String-to-HTML conversion, CSS class combinations, selector problems
-- ONLY ALLOWED: Pure data transformation, string parsing (non-HTML), array manipulation, tree/graph algorithms, DP, recursion, sorting, searching, sliding window, hashing, stack/queue problems
-- The function must take inputs and RETURN a data value — not build components or modify state
+CRITICAL: Do NOT use placeholders like [named parameter], [constraint 1], [example value].
+Use REAL variable names, REAL constraints, and REAL data.
 
-Output ONLY valid JSON in this format. Must include BOTH starterCode.javascript and starterCode.python and AT LEAST 4 testCases (2 visible, 2 hidden) and update the count of test cases based on problem difficulty upto max of 8 test cases as hidden in format (2 visible + 10-15 hidden).
-
-TIME LIMITS: easy=1200s (20min), medium=1800s (30min), hard=2700s (45min). Use the correct timeLimit for each question's difficulty.
-
-RUBRIC RULES:
-- Every coding question MUST include a "rubric" field.
-- Rubric explains what full credit vs partial credit looks like.
-- Format: "Optimal solution uses [approach] for O([complexity]). [Alternative approach] gets partial credit. [Edge case] must be handled."
-- Example: "Optimal solution uses a HashMap for O(n) time O(n) space. Brute force O(n²) nested loop gets 50% credit. Must handle empty array edge case."
-- Rubric must NOT give away the solution — just describe the expected quality level.
-
-CODING DESCRIPTION FORMAT — MANDATORY:
-Every coding question description MUST be structured exactly like this:
-
+Example of GOOD description format:
 Problem Statement:
-[2-3 sentences describing the problem scenario clearly]
+Given an array of integers, find the sum of all elements that are greater than their neighbors. An element is greater than its neighbors if it is strictly larger than the element to its left and its right.
 
 Input Format:
-[List exactly what the function receives — parameter names, types, constraints]
+nums: array of integers (3 <= nums.length <= 10^4, -10^5 <= nums[i] <= 10^5)
 
 Output Format:
-[List exactly what should be returned — type and conditions]
+Returns an integer representing the total sum of such elements.
 
 Constraints:
-- [constraint 1 with exact bounds]
-- [constraint 2]
-- [time/space complexity expectation if relevant]
+- Time Complexity: O(n)
+- Space Complexity: O(1)
 
 Examples:
-Input: [named parameter] = [value], [named parameter] = [value]
-Output: [expected output]
-Explanation: [why this is the answer]
-
-Input: [named parameter] = [value]
-Output: [expected output]
-Explanation: [why this is the answer]
-
-DO NOT write everything in one paragraph.
-DO NOT skip any section.
-Each section MUST start on a new line with the section header followed by a colon.
+Input: nums = [1, 5, 2, 8, 3]
+Output: 13
+Explanation: 5 and 8 are local peaks (5 > 1,2 and 8 > 2,3). Sum = 5 + 8 = 13.
 
 {
   "questions": [
     {
       "type": "coding",
-      "title": "...",
-      "difficulty": "easy|medium|hard",
-      "description": "Full LeetCode-style statement: Problem Statement, Input, Output, Constraints, Examples",
-      "rubric": "...",
-      "starterCode": { "javascript": "...", "python": "..." },
+      "title": "Sum of Local Peaks",
+      "difficulty": "medium",
+      "description": "Problem Statement... Input... Output... Constraints... Examples...",
+      "rubric": "Optimal solution uses a single pass for O(n). Partial credit for nested loops.",
+      "starterCode": { 
+        "javascript": "function solution(nums) {\n  // your code here\n}", 
+        "python": "def solution(nums):\n    # your code here\n    pass" 
+      },
       "testCases": [
-        { "input": ..., "expectedOutput": ..., "isVisible": true },
-        { "input": ..., "expectedOutput": ..., "isVisible": true },
-        { "input": ..., "expectedOutput": ..., "isVisible": false },
-        { "input": ..., "expectedOutput": ..., "isVisible": false }
+        { "input": { "nums": [1, 5, 2, 8, 3] }, "expectedOutput": 13, "isVisible": true },
+        { "input": { "nums": [10, 20, 30] }, "expectedOutput": 0, "isVisible": true },
+        { "input": { "nums": [1, 2, 1, 2, 1] }, "expectedOutput": 4, "isVisible": false }
       ],
-      "timeLimit": 1200|1800|2700,
-      "reasoning": "..."
+      "timeLimit": 1800,
+      "reasoning": "Tests array traversal and local peak logic."
     }
   ]
 }`;
 }
 
+
 async function ensureQuestionCount(current, required, type, roleData) {
   if (current.length >= required) return current;
+  
   const missing = required - current.length;
-  const coveredTopics = current.map(q => (q.title || q.question || '').split(' ').slice(0, 5).join(' ')).join(', ');
+  const coveredTopics = current
+    .map(q => (q.title || q.question || '').split(' ').slice(0, 5).join(' '))
+    .join(', ');
   const skills = roleData.skillsList || '';
   const diff = roleData.difficulty || 'medium';
-  const mcqExtra = `Skills to test: ${skills}. Required difficulty: ${diff.toUpperCase()}. Avoid: ${coveredTopics}.`;
-  const codingExtra = `Required difficulties: ${(roleData.difficulties || [diff]).join(', ')}. Avoid topics already covered: ${coveredTopics}.`;
+
+  console.log(`[ensureQuestionCount] Generating ${missing} more ${type} questions`);
+
   try {
-    const content = await callAI(
-      type === 'mcq'
-        ? mcqExtra + '\n' + buildMCQFormat()
-        : codingExtra + '\n' + buildCodingFormat()
-    );
+    let prompt;
+
+    if (type === 'mcq') {
+      prompt = `Generate EXACTLY ${missing} technical MCQ questions for skills: ${skills}.
+Required difficulty: ${diff.toUpperCase()}.
+Avoid these already covered topics: ${coveredTopics}.
+
+${buildMCQFormat()}`;
+    } else {
+      const difficulties = (roleData.difficulties || [diff]).slice(0, missing);
+      
+      // Use the FULL coding prompt — same as original generateQuestions
+      prompt = `You are generating ${missing} algorithmic coding questions for a hiring assessment targeting these skills: ${skills}.
+Required difficulties: ${difficulties.join(', ')}.
+Avoid these already covered topics: ${coveredTopics}.
+
+CRITICAL: Do NOT use placeholder text like [named parameter], [constraint 1], [linked list], [array of integers] etc.
+Write REAL concrete problem statements with actual variable names, real constraints (e.g. 1 <= n <= 1000), and real examples.
+
+${buildCodingFormat()}`;
+    }
+
+    const content = await callAI(prompt);
     const parsed = parseAIResponse(content);
-    const add = parsed.filter(q => type === 'mcq' ? (q.type === 'mcq' || Array.isArray(q.options)) : isValidCodingQuestion(q));
+
+    const add = parsed.filter(q =>
+      type === 'mcq'
+        ? (q.type === 'mcq' || Array.isArray(q.options))
+        : isValidCodingQuestion(q, current.map(x => (x.title || '').toLowerCase()))
+    );
+
+    console.log(`[ensureQuestionCount] Got ${add.length} valid ${type} questions`);
     return [...current, ...add].slice(0, required);
+
   } catch (err) {
+    console.warn(`[ensureQuestionCount] Failed: ${err.message}`);
     throw new Error(`Failed to generate additional ${type} questions: ${err.message}`);
   }
 }
