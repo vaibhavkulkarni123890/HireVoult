@@ -148,7 +148,7 @@ async function callClaude(prompt) {
     },
     body: JSON.stringify({
       model: process.env.CLAUDE_MODEL_NAME || 'claude-3-5-sonnet-20241022',
-      max_tokens: 3000,
+      max_tokens: 5000,
       temperature: 0.3,
       messages: [{ role: 'user', content: prompt }]
     })
@@ -472,17 +472,25 @@ function parseAIResponse(content) {
     throw new Error('AI returned empty content');
   }
 
+  // Temporary debug logging — remove after fixing
+  console.warn('[parseAIResponse] Raw length:', content.length);
+  console.warn('[parseAIResponse] Start:', content.slice(0, 300));
+  console.warn('[parseAIResponse] End:', content.slice(-200));
+
   let jsonStr = content.trim();
 
   // Strip all markdown code fences first (handles ```json at start)
   jsonStr = jsonStr.replace(/^```(?:json)?\s*/m, '').replace(/\s*```$/m, '').trim();
 
   // Try to find the JSON part if there is preamble or postamble
-  const jsonMatch = jsonStr.match(/\{[\s\S]*\}/);
-  if (jsonMatch) {
-    jsonStr = jsonMatch[0].trim();
-  }
-
+ const jsonMatch = jsonStr.match(/\{[\s\S]*\}/);
+if (jsonMatch) {
+  jsonStr = jsonMatch[0].trim();
+}
+// Fix unescaped newlines inside JSON strings
+jsonStr = jsonStr.replace(/"([^"\\]*(\\.[^"\\]*)*)"/gs, (match) => {
+  return match.replace(/\n/g, '\\n').replace(/\r/g, '\\r').replace(/\t/g, '\\t');
+});
   // Strategy 1: Direct parse
   try {
     const parsed = JSON.parse(jsonStr);
@@ -493,12 +501,12 @@ function parseAIResponse(content) {
   } catch (e) {}
 
   // Strategy 2: Sanitize and parse
-  const sanitized = jsonStr
+const sanitized = jsonStr
     .replace(/\/\/.*$/gm, '')
     .replace(/\/\*[\s\S]*?\*\//g, '')
-    .replace(/,(\s*[}\]])/g, '$1')
-    .replace(/,(\s*[}\]])/g, '$1')
+    .replace(/,+(\s*[}\]])/g, '$1')   // fixed: removes ALL trailing commas in one pass
     .replace(/,,/g, ',')
+    .replace(/`/g, "'")               // new: removes backticks from starterCode
     .replace(/[\x00-\x1F\x7F]/g, '')
     // Normalize smart quotes
     .replace(/[“”]/g, '"')
