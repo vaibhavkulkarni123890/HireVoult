@@ -470,106 +470,51 @@ Return ONLY JSON.
 function parseAIResponse(content) {
   if (!content) throw new Error('AI returned empty content');
 
-  console.warn('[parseAIResponse] Raw length:', content.length);
-  console.warn('[parseAIResponse] Start:', content.slice(0, 300));
-  console.warn('[parseAIResponse] End:', content.slice(-200));
-
   let jsonStr = content.trim();
 
-  // Strip markdown fences
-  jsonStr = jsonStr.replace(/^```(?:json)?\s*/m, '').replace(/\s*```\s*$/m, '').trim();
-
-  // Extract JSON object
-  const jsonMatch = jsonStr.match(/\{[\s\S]*\}/);
-  if (jsonMatch) jsonStr = jsonMatch[0].trim();
-
-  // Fix unescaped newlines inside string values
-  jsonStr = jsonStr.replace(/:(\s*)"([\s\S]*?)"/g, (match, space, val) => {
-    const fixed = val
-      .replace(/\n/g, '\\n')
-      .replace(/\r/g, '\\r')
-      .replace(/\t/g, '\\t');
-    return `:${space}"${fixed}"`;
-  });
-
-  // Fix single-quoted string values  e.g.  "key": 'value'  or  "key": ''
-  jsonStr = jsonStr.replace(/:\s*'([^']*)'/g, ': "$1"');
-  // Fix single-quoted inside arrays  ['a','b']
-  jsonStr = jsonStr.replace(/\[\s*'([^']*)'/g, '["$1"');
-  jsonStr = jsonStr.replace(/'([^']*?)'\s*([,\]])/g, '"$1"$2');
-
-  // Fix ] used instead of } to close an object
-  // Pattern: last property value followed by ] when } is expected
-  jsonStr = jsonStr.replace(/("(?:reasoning|rubric|difficulty|timeLimit|points|correctOption|type)"\s*:\s*(?:"[^"]*"|\d+))\s*\]/g, '$1\n    }');
-
-  // Strip comments
+  // Remove markdown
   jsonStr = jsonStr
-    .replace(/\/\/.*$/gm, '')
-    .replace(/\/\*[\s\S]*?\*\//g, '');
+    .replace(/```json\s*/gi, '')
+    .replace(/```\s*/gi, '')
+    .trim();
 
-  // Fix trailing commas
-  jsonStr = jsonStr.replace(/,+(\s*[}\]])/g, '$1');
+  // Extract JSON
+  const match = jsonStr.match(/\{[\s\S]*\}/);
+  if (match) jsonStr = match[0];
 
-  // Fix backticks
-  jsonStr = jsonStr.replace(/`/g, '"');
+  // Remove control chars (CRITICAL FIX)
+  jsonStr = jsonStr.replace(/[\x00-\x1F\x7F]/g, '');
 
-  // Normalize smart quotes
-  jsonStr = jsonStr.replace(/[""]/g, '"').replace(/['']/g, "'");
+  // Remove trailing commas
+  jsonStr = jsonStr.replace(/,\s*}/g, '}').replace(/,\s*]/g, ']');
 
-  // Fix unquoted keys
-  jsonStr = jsonStr.replace(/([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)(\s*:)/g, '$1"$2"$3');
-
-  // Normalize Python booleans and nulls
- // Strip ALL markdown fences aggressively
-jsonStr = jsonStr.replace(/```json\s*/gi, '').replace(/```\s*/gi, '').trim();
-
-  // Strategy 1: Direct parse
   try {
     const parsed = JSON.parse(jsonStr);
-    const raw = parsed.questions || (Array.isArray(parsed) ? parsed : []);
-    if (raw.length > 0) return raw.map(q => sanitizeQuestion(q));
-  } catch (e) {
-    console.warn('[parseAIResponse] Strategy 1 failed:', e.message);
-  }
+    const arr = parsed.questions || (Array.isArray(parsed) ? parsed : []);
+    return arr.map(q => sanitizeQuestion(q));
+  } catch (err) {
+    console.warn('[parseAIResponse] Direct parse failed');
 
-  // Strategy 2: Extract individual objects from questions array
-  const questionsStart = jsonStr.indexOf('"questions"');
-  let arrayContent = null;
-  if (questionsStart !== -1) {
-    const after = jsonStr.substring(questionsStart);
-    const bracketPos = after.indexOf('[');
-    if (bracketPos !== -1) arrayContent = after.substring(bracketPos);
-  } else {
-    const arrayStart = jsonStr.indexOf('[');
-    if (arrayStart !== -1) arrayContent = jsonStr.substring(arrayStart);
-  }
+    // Extract individual objects
+    const objects = extractAllTopLevelObjects(jsonStr);
 
-  if (arrayContent) {
-    const objects = extractAllTopLevelObjects(arrayContent);
-    if (objects.length > 0) {
-      const valid = [];
-      for (const objStr of objects) {
-        try {
-          valid.push(sanitizeQuestion(JSON.parse(objStr)));
-        } catch {
-          try {
-            // Last resort: fix single quotes inside individual object
-            const cleaned = objStr
-              .replace(/:\s*'([^']*)'/g, ': "$1"')
-              .replace(/'([^']*?)'\s*([,\]])/g, '"$1"$2')
-              .replace(/,+(\s*[}\]])/g, '$1')
-              .replace(/([{,]\s*)([a-zA-Z_][a-zA-Z0-9_]*)(\s*:)/g, '$1"$2"$3');
-            valid.push(sanitizeQuestion(JSON.parse(cleaned)));
-          } catch (inner) {
-            console.warn('[parseAIResponse] Could not parse object:', inner.message);
-          }
-        }
-      }
-      if (valid.length > 0) return valid;
+    const valid = [];
+
+    for (const obj of objects) {
+      try {
+        const cleaned = obj
+          .replace(/[\x00-\x1F\x7F]/g, '')
+          .replace(/,\s*}/g, '}');
+
+        const parsed = JSON.parse(cleaned);
+        valid.push(sanitizeQuestion(parsed));
+      } catch {}
     }
-  }
 
-  throw new Error('Invalid JSON format received from AI. Please try again.');
+    if (valid.length > 0) return valid;
+
+    throw new Error('Invalid JSON from AI');
+  }
 }
 
 function extractAllTopLevelObjects(str) {
@@ -684,15 +629,19 @@ if (hasPlaceholders) {
     fullText.includes('button') || fullText.includes('counter component');
   if (isNonDSA) return false;
 
-  // Filter out toy problems for Junior roles
-  if (seniority.toLowerCase() === 'junior') {
-    const toyProblems = [
-      'two sum', 'reverse string', 'palindrome', 'fizzbuzz', 'fibonacci',
-      'anagram', 'array rotation', 'simple array sum', 'power of two', 'check prime',
-      'contains duplicate', 'max subarray', 'climbing stairs', 'merge sorted array'
-    ];
-    if (toyProblems.some(toy => titleOrDesc.includes(toy))) return false;
+// Filter out ONLY extremely trivial problems for Junior roles
+if (seniority.toLowerCase() === 'junior') {
+  const toyProblems = [
+    'fizzbuzz',
+    'check prime',
+    'power of two'
+  ];
+
+  // Reject ONLY if exact trivial match
+  if (toyProblems.some(toy => titleOrDesc.trim() === toy)) {
+    return false;
   }
+}
 
   if (existingTitles.includes(titleOrDesc)) return false;
   return true;
@@ -751,32 +700,51 @@ Required difficulties: ${codingDiffs.join(', ')}.
     console.warn(`[QuestionGenerator] MCQ generation failed: ${err.message}`);
   }
 
-  let codingContent = '';
-  try {
-    codingContent = await callAI(codingPrompt);
-    const parsed  = parseAIResponse(codingContent);
-    const filtered = parsed.filter(q => isValidCodingQuestion(q));
-    generatedCoding = filtered.map((q, i) => {
-      const diff = (codingDiffs[i] || codingDiffs[0] || 'medium').toLowerCase();
-      q.difficulty = diff;
-      if (diff === 'easy')   q.timeLimit = 1200, q.points = 15;
-      else if (diff === 'hard') q.timeLimit = 2700, q.points = 25;
-      else                      q.timeLimit = 1800, q.points = 20;
-      return q;
-    }).slice(0, codingCount);
-  } catch (err) {
-    console.warn(`[QuestionGenerator] Coding generation failed: ${err.message}`);
-    if (codingContent) {
-      try {
-        const logsDir = path.join(__dirname, '..', 'logs');
-        if (!fs.existsSync(logsDir)) fs.mkdirSync(logsDir, { recursive: true });
-        const logPath = path.join(logsDir, `coding_${Date.now()}.txt`);
-        fs.writeFileSync(logPath, codingContent);
-        console.warn(`[QuestionGenerator] Full response (${codingContent.length} chars) saved to: ${logPath}`);
-      } catch (e) {}
-    }
-  }
+let generatedCoding = [];
 
+const MAX_RETRIES = 3;
+
+for (let attempt = 1; attempt <= MAX_RETRIES; attempt++) {
+  console.log(`[AI Retry] Coding attempt ${attempt}`);
+
+  try {
+    const content = await callAI(codingPrompt);
+
+    const parsed = parseAIResponse(content);
+
+    const filtered = parsed.filter(q =>
+      isValidCodingQuestion(q)
+    );
+
+    if (filtered.length >= codingCount) {
+      generatedCoding = filtered.slice(0, codingCount);
+      break;
+    }
+
+    console.warn(`[Retry] Only got ${filtered.length}/${codingCount} valid coding`);
+
+    // 🔥 IMPROVED RETRY PROMPT (VERY IMPORTANT)
+    codingPrompt += `
+
+FIX YOUR OUTPUT:
+- Your previous response had INVALID JSON or INVALID questions
+- DO NOT include placeholders like [named parameter]
+- DO NOT include broken strings or newlines
+- Output STRICT VALID JSON
+- Ensure EXACTLY ${codingCount} VALID coding questions
+`;
+
+  } catch (err) {
+    console.warn(`[Retry Error] ${err.message}`);
+  }
+}
+
+// FINAL HARD CHECK
+if (generatedCoding.length < codingCount) {
+  throw new Error(
+    `AI failed after ${MAX_RETRIES} retries. Got ${generatedCoding.length}/${codingCount} coding questions`
+  );
+}
   console.log(`[QuestionGenerator] MCQ generated so far: ${generatedMCQs.length}/${mcqCount}`);
   if (generatedMCQs.length < mcqCount) {
     console.log(`[QuestionGenerator] MCQ shortfall - calling ensureQuestionCount for ${mcqCount - generatedMCQs.length} more MCQs`);
@@ -883,6 +851,12 @@ Input Format:
 
 Output Format:
 [List exactly what should be returned — type and conditions]
+
+CRITICAL JSON RULES:
+- Do NOT include real line breaks inside strings
+- Use \\n instead
+- Output must be directly parsable using JSON.parse()
+- Do NOT truncate JSON
 
 Constraints:
 - [constraint 1 with exact bounds]
