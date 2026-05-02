@@ -879,6 +879,7 @@ CRITICAL JSON RULES:
 - Use \\n instead
 - Output must be directly parsable using JSON.parse()
 - Do NOT truncate JSON
+- starterCode MUST ONLY contain the function signature/definition and an empty body (e.g., \`function name(args) { \\n  // Write your code here \\n}\`). NEVER INCLUDE THE ACTUAL SOLUTION OR IMPLEMENTATION IN starterCode!
 
 Constraints:
 - [constraint 1 with exact bounds]
@@ -906,7 +907,7 @@ Each section MUST start on a new line with the section header followed by a colo
       "difficulty": "easy|medium|hard",
       "description": "Full LeetCode-style statement: Problem Statement, Input, Output, Constraints, Examples",
       "rubric": "...",
-      "starterCode": { "javascript": "...", "python": "..." },
+      "starterCode": { "javascript": "function myAlgo(param1) { \\n  // Write your code here\\n}", "python": "def myAlgo(param1):\\n    # Write your code here\\n    pass" },
       "testCases": [
         { "input": ..., "expectedOutput": ..., "isVisible": true },
         { "input": ..., "expectedOutput": ..., "isVisible": true },
