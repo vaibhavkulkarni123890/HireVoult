@@ -633,7 +633,15 @@ if (hasPlaceholders) {
   if (isNonDSA) return false;
 
 // Filter out ONLY extremely trivial problems for Junior roles
-
+  if (allowedDifficulties.includes('easy') && !allowedDifficulties.includes('hard')) {
+    const toyProblems = [
+      'two sum', 'reverse string', 'palindrome', 'fizzbuzz', 'fibonacci',
+      'anagram', 'array rotation', 'simple array sum', 'power of two', 'check prime',
+      'contains duplicate', 'max subarray', 'climbing stairs', 'merge sorted array',
+      'element frequency', 'frequency', 'sum of elements'
+    ];
+    if (toyProblems.some(toy => titleOrDesc.includes(toy))) return false;
+  }
 
   if (existingTitles.includes(titleOrDesc)) return false;
   return true;
@@ -658,8 +666,8 @@ const isUnspecified = !seniorityRaw || seniorityRaw === 'unspecified';
 let allowedDifficulties = ['easy', 'medium']; // default
 
 if (!isUnspecified) {
-  if (seniorityRaw === 'junior') {
-    allowedDifficulties = ['easy'];
+  if (seniorityRaw === 'junior' || seniorityRaw === 'intern') {
+    allowedDifficulties = ['easy', 'medium'];
   } else if (seniorityRaw === 'mid') {
     allowedDifficulties = ['easy', 'medium'];
   } else if (seniorityRaw === 'senior') {
@@ -915,7 +923,7 @@ Each section MUST start on a new line with the section header followed by a colo
         { "input": ..., "expectedOutput": ..., "isVisible": false }
       ],
       "timeLimit": 1200|1800|2700,
-      "reasoning": "..."
+      "reasoning": "Tests algorithmic problem solving and array manipulation skills."
     }
   ]
 }`;
